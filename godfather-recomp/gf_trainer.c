@@ -965,10 +965,12 @@ void gf_mainmenu_uix(uint64_t stream)
         p += sz;
     }
     if (!tit || memcmp(vm_base + tit, "frontend", 9)) return;   /* some other movie */
-    static const char k_trace[] = "**********screen_stub.as**********", k_label[] = "Quit to Desktop";
+    static const char k_trace[] = "**********screen_stub.as**********";
+    extern const char* ui_tr(const char* en);
+    char k_label[sizeof k_trace]; { const char* l = ui_tr("Quit to Desktop"); if (strlen(l) >= sizeof k_label) l = "Quit to Desktop"; strcpy(k_label, l); }   /* game language (ui_i18n.c) */
     if (!A || !C || C <= A || C - A > 0x10000u) { printf("[quitmenu] v1058Q frontend.uix without apt/const data -- not patched\n"); fflush(stdout); return; }
     /* already patched (buffer re-parsed)? */
-    if (rd32(A + 0x161C) == 10 && !memcmp(vm_base + C + 0x135C, k_label, sizeof k_label)) { s_qd_patched = 1; return; }
+    if (rd32(A + 0x161C) == 10 && !memcmp(vm_base + C + 0x135C, k_label, strlen(k_label) + 1)) { s_qd_patched = 1; return; }
     static const uint32_t k_list[10] = { 206, 207, 208, 209, 210, 211, 212, 213, 214, 215 };
     int good = !memcmp(vm_base + A, "Apt Data:7\x1a", 11) && !memcmp(vm_base + C, "Apt constant file\x1a", 18)
             && rd32(C + 0x18) == 0x218u
@@ -987,7 +989,7 @@ void gf_mainmenu_uix(uint64_t stream)
     for (int i = 0; i < 10; i++) wr32(A + 0x2594 + 4u * (uint32_t)i, k_new[i]);
     wr32(A + 0x161C, 10);
     wr32(C + 0x24 + 8 * 201, 7); wr32(C + 0x24 + 8 * 214, 7);
-    memset(vm_base + C + 0x135C, 0, sizeof k_trace); memcpy(vm_base + C + 0x135C, k_label, sizeof k_label);
+    memset(vm_base + C + 0x135C, 0, sizeof k_trace); memcpy(vm_base + C + 0x135C, k_label, strlen(k_label) + 1);
     s_qd_patched = 1;
     printf("[quitmenu] v1058Q main menu: QUIT TO DESKTOP added under BONUS VIDEOS (apt 0x%08X)\n", A); fflush(stdout);
 }

@@ -509,7 +509,7 @@ static void open_menu(void)
     prime_keys();
     /* v1107L: women get a Flirt option */
     D.nact = 0; D.acts[D.nact++] = A_HELLO; D.acts[D.nact++] = A_GOSSIP; if (D.female) D.acts[D.nact++] = A_FLIRT; D.acts[D.nact++] = A_THREAT; D.acts[D.nact++] = A_LEAVE;
-    for (int i = 0; i < D.nact; i++) snprintf(g_gfd_opt[i], 40, "%s", k_act_label[D.acts[i]]);
+    for (int i = 0; i < D.nact; i++) { extern const char* ui_tr(const char* en); snprintf(g_gfd_opt[i], 40, "%s", ui_tr(k_act_label[D.acts[i]])); }
     g_gfd_nopt = D.nact; if (g_gfd_sel < 0 || g_gfd_sel >= D.nact) g_gfd_sel = 0;
     snprintf(g_gfd_who, sizeof g_gfd_who, "%s", D.name);
     g_gfd_menu = 1; D.st = D_MENU; D.t_menu = now_s();
