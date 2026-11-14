@@ -1,6 +1,7 @@
 """gf_uifont_build.py -- build assets/ui_font.bin (the overlay's font: inventory, stores, PC settings / co-op menu,
-notices) from the player's disc: the controller icons come from the game's button prompt atlas, the letters from
-installed fonts (gf_uifont.py: bold sans; gf_uifont_serif.py: serif titles, with Latin-1 accents).
+notices) from the player's disc. First choice: the game's own fonts (gf_uifont_game.py: Trade Gothic + Magnesium,
+every Windows-1252 letter). Fallback (UI_FONT_TTF=1 forces it): installed fonts (gf_uifont.py: bold sans;
+gf_uifont_serif.py: serif titles). The controller icons come from the game's button prompt atlas either way.
 usage: python gf_uifont_build.py <USRDIR> <out ui_font.bin>"""
 import os, sys, struct, subprocess, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +10,11 @@ import gf_kbm_build as K
 
 def main(usr, out):
     out = os.path.abspath(out); os.makedirs(os.path.dirname(out), exist_ok=True)
+    if os.environ.get('UI_FONT_TTF', '') in ('', '0'):
+        try:
+            import gf_uifont_game; gf_uifont_game.main(usr, out); return
+        except (Exception, SystemExit) as e:
+            print('game fonts not usable (%s) -- using installed fonts' % e)
     w, h, raw = K.find_atlas(usr)
     work = tempfile.mkdtemp(prefix='gf_uifont_')
     tex = os.path.join(work, 'buttons.tex'); tmp = os.path.join(work, 'ui_font.bin')
