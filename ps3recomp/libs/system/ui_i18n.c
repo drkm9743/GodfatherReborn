@@ -4,8 +4,14 @@
  * is no translation. Keys are the exact English strings in the source, including printf formats (a translated format
  * keeps the same conversions in the same order). Strings are UTF-8. UI_TR=0 turns translations off. */
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 typedef struct { const char* en; const char* tr; } UiTr;
 
@@ -113,9 +119,40 @@ static short s_h[HN];   /* open-addressing index into s_tab, -1 = empty */
 
 static uint32_t h_str(const char* s) { uint32_t h = 2166136261u; while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; } return h; }
 
+/* No PS3_LANG: a single-language disc (e.g. BLES00047, PS3_GAME/USRDIR/text/localetable.txt line 3 "pal_es") plays in
+ * its own language whatever the system language is -- follow the disc. argv[1] is the EBOOT.elf in USRDIR. */
+static const char* disc_lang(void)
+{
+#ifdef _WIN32
+    static char lang[16];
+    int n = 0; LPWSTR* av = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (!av) return NULL;
+    wchar_t path[1024]; path[0] = 0;
+    if (n > 1 && wcslen(av[1]) < 900) {
+        wcscpy(path, av[1]); wchar_t* s = wcsrchr(path, L'\\'); wchar_t* s2 = wcsrchr(path, L'/'); if (s2 > s) s = s2;
+        if (s) wcscpy(s + 1, L"text\\localetable.txt"); else path[0] = 0;
+    }
+    LocalFree(av);
+    FILE* f = path[0] ? _wfopen(path, L"rb") : NULL;
+    if (!f) return NULL;
+    char line[64]; int i = 0; const char* r = NULL;
+    while (fgets(line, sizeof line, f) && ++i <= 3) {
+        if (i < 3) continue;
+        if (!strncmp(line, "pal_es", 6)) r = "spanish";
+        else if (!strncmp(line, "pal_fr", 6)) r = "french";
+        else if (!strncmp(line, "pal_it", 6)) r = "italian";
+        else if (!strncmp(line, "pal_de", 6)) r = "german";
+    }
+    fclose(f);
+    if (r) { snprintf(lang, sizeof lang, "%s", r); return lang; }
+#endif
+    return NULL;
+}
+
 static void ui_tr_init(void)
 {
     const char* off = getenv("UI_TR"); const char* l = getenv("PS3_LANG");
+    if (!l || !*l) l = disc_lang();
     int n = 0;
     if (!(off && *off == '0') && l && !strcmp(l, "spanish")) { s_tab = k_es; n = (int)(sizeof k_es / sizeof k_es[0]); }
     for (int i = 0; i < HN; i++) s_h[i] = -1;
