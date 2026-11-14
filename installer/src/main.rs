@@ -347,7 +347,7 @@ fn eboot_hash_check(s: &Session, elf: &Path, lock: Option<&lock::Lock>) -> Resul
         expected.push(e);
     }
     if !expected.is_empty() && !expected.contains(&sha) {
-        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BLES00043, v1.01 disc executable)";
+        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BLES00043 or BLES00047, v1.01 disc executable)";
         if !s.o.force {
             bail!("{msg}.\n    --force tries anyway; expect the patch step to fail.");
         }

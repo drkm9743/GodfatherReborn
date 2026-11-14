@@ -19,8 +19,9 @@
 
 [game]
 title = "The Godfather"
-title_ids = ["BLES00043"]
-# sha256 of the decrypted PS3_GAME/USRDIR/EBOOT.elf the port was built from (European disc, v1.01).
+title_ids = ["BLES00043", "BLES00047"]
+# sha256 of the decrypted PS3_GAME/USRDIR/EBOOT.elf the port was built from (European disc, v1.01). BLES00047 (Spanish
+# edition "Don Corleone") ships a byte-identical EBOOT.elf, so the same hash covers both.
 eboot_sha256 = ["0edb8c7b5742e111a4d73e854f53098f0e90426823f082a4cec230815418b1af"]
 # The port's tools look for the game at ../<this name>. The installer links the player's dump
 # there (a directory junction on Windows), wherever it really is.

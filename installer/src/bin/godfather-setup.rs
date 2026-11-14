@@ -304,7 +304,7 @@ impl App {
             payload_bytes: 0,
             load_error: None,
             title: "The Godfather".into(),
-            title_ids: vec!["BLES00043".into()],
+            title_ids: vec!["BLES00043".into(), "BLES00047".into()],
             link_name: "Godfather, The - The Don's Edition (Europe)".into(),
             repaint,
             reqs: Arc::new(Mutex::new(Reqs {
