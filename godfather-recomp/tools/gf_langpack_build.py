@@ -2,19 +2,26 @@
 
 The port always runs on the BLES00043 (EUR, English) data. The French / Italian / German / Spanish discs
 (BLES00044 / 45 / 46 / 47) carry the same executable and the same game assets; only their localisation differs.
-This copies just that localisation into <out>/ (a folder mirroring USRDIR); at run time a file found there replaces
-the base disc's file (ps3recomp runtime/syscalls/sys_fs.c, PS3_LANG_PACK / langpack/<code>):
-  text/localetable.txt                  which language the game loads
-  */text/*.str                          the string tables (menus, HUD, subtitles)
-  audiostreams/<XX>/**                  the dubbed voices
-  movies/*.vp6 that differ              the loading movie and the narrated training videos
-  **/dlg/**                             per-language dialogue data
-  **/missions/** that differ            mission scripts and cutscenes with their subtitles inside
-Map, model and texture files are never taken from the language disc (they differ only in build paths).
+This copies just that localisation into <langpack dir>/<code>/ (a folder mirroring USRDIR); at run time a file found
+there replaces the base disc's file at the same path (ps3recomp runtime/syscalls/sys_fs.c, PS3_LANG_PACK /
+langpack/<code> for the launcher's language):
+  text/localetable.txt               which language the game loads
+  */text/*.str                       the string tables (menus, HUD, subtitles)
+  frontend/frontend.str              the menus, and the index of the frontend string tables
+  godfather_v4/godfather_global_global.str, wb_mobface_final/wb_mobface_final_global.str
+                                     the index of the in-game string tables (each table is found by an ID stored
+                                     inside it, so the index must come from the same disc as the tables); apart from
+                                     that index these two match BLES00043 except for build paths
+  audiostreams/<XX>/**               the dubbed voices
+  movies/*.vp6 that differ           the loading movie and the narrated training videos
+  **/dlg/**                          per-language dialogue data
+  **/missions/** that differ         mission scripts and cutscenes with their subtitles inside
+Map, model and character files are never taken from the language disc.
 usage: python gf_langpack_build.py <BLES00043 USRDIR> <language disc USRDIR> <langpack dir>  (writes <langpack dir>/<code>)"""
-import os, sys, shutil, hashlib
+import os, sys, shutil
 
 LANG_DISCS = {'BLES00044': 'fr', 'BLES00045': 'it', 'BLES00046': 'de', 'BLES00047': 'es'}
+INDEXES = {'frontend/frontend.str', 'godfather_v4/godfather_global_global.str', 'wb_mobface_final/wb_mobface_final_global.str'}
 
 def localetable(usr):
     p = os.path.join(usr, 'text', 'localetable.txt')
@@ -23,7 +30,6 @@ def localetable(usr):
 
 def same(a, b):
     if os.path.getsize(a) != os.path.getsize(b): return False
-    ha, hb = hashlib.sha1(), hashlib.sha1()
     with open(a, 'rb') as fa, open(b, 'rb') as fb:
         while True:
             x, y = fa.read(1 << 20), fb.read(1 << 20)
@@ -32,7 +38,6 @@ def same(a, b):
 
 def put(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src): return
     try: os.link(src, dst)                       # same volume: no extra space
     except OSError: shutil.copy2(src, dst)
 
@@ -47,11 +52,11 @@ def main(base, lang, out):
     n = size = 0
     for root, dirs, files in os.walk(lang):
         for f in files:
-            src = os.path.join(root, f); rel = os.path.relpath(src, lang).replace('\\', '/'); parts = rel.split('/')
+            src = os.path.join(root, f); rel = os.path.relpath(src, lang).replace(os.sep, '/'); parts = rel.split('/')
             low = rel.lower(); bsrc = os.path.join(base, rel)
-            take = (low == 'text/localetable.txt'
+            take = (low == 'text/localetable.txt' or rel in INDEXES
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
-                    or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and len(parts[1]) == 2 and parts[1].isupper())
+                    or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and parts[1] == code.upper())
                     or '/dlg/' in '/' + low
                     or ((parts[0].lower() == 'movies' or '/missions/' in '/' + low) and not (os.path.isfile(bsrc) and same(src, bsrc))))
             if not take: continue
