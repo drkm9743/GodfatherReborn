@@ -1,3 +1,6 @@
+# Store every file byte-for-byte: the updater compares GitHub blob hashes with the local files,
+# and the installer's .patch files mix CRLF/LF on purpose. No line-ending conversion, ever.
+* -text
 # Binaries are stored as they are.
 *.exe binary
 *.png binary

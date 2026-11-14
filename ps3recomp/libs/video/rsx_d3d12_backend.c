@@ -760,7 +760,7 @@ static void particle_size(u32* w, u32* h)
     rsx_particle_size(w, h, on, s_d3d.width, s_d3d.height);
     res_scale_dims(w, h);   /* v154 */
 }
-/* v1041V RES_SCALE_FIXES (default 0; 1 = on): corrections for paths that were written for RES_SCALE 1 only.
+/* v1041V RES_SCALE_FIXES (v1129R: default 1 -- every path, incl. play.cmd / settings.ini RES_SCALE, gets them; 0 = old): corrections for paths that were written for RES_SCALE 1 only.
  * Every correction below only acts on a target that is allocated larger than its guest size (the same test the
  * per-draw viewport scaling uses: particle_size(guest) == the target's real size != guest), which never happens at
  * RES_SCALE 1 (and PARTICLE_FULLRES off), so all of them are exact no-ops at scale 1:
@@ -774,7 +774,7 @@ static void particle_size(u32* w, u32* h)
 static int rsf_on(void)
 {
     static int v = -1;
-    if (v < 0) { const char* e = getenv("RES_SCALE_FIXES"); v = (e && *e == '1') ? 1 : 0;
+    if (v < 0) { const char* e = getenv("RES_SCALE_FIXES"); v = (e && *e == '0') ? 0 : 1;   /* v1129R: default ON */
                  fprintf(stderr, "[V1041V] RES_SCALE corrections for clear rects / viewport fit / full-view present test (RES_SCALE_FIXES): %s (RES_SCALE %.2f, targets %ux%u)%c",
                          v ? "ON" : "off", s_res_scale, s_bbw, s_bbh, 10); }
     return v;
