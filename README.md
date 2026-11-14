@@ -72,9 +72,11 @@ are kept.
 ## Requirements
 
 - Your own copy of **The Godfather: The Don's Edition** (PS3, Europe,
-  `BLES00043`), dumped from your console. The Spanish edition "Don Corleone"
-  (`BLES00047`) has an identical executable and also works, with its own
-  language files (set Language to Spanish in the launcher). Setup refuses other versions.
+  `BLES00043`), dumped from your console. Setup refuses other versions.
+- Optional, for French, Italian, German or Spanish voices and text: also your
+  dump of that country's disc (`BLES00044` FRA, `BLES00045` ITA, `BLES00046` GER,
+  `BLES00047` SPA). Only its language files are used, on top of `BLES00043`
+  (`godfather-installer --lang-game <dump>`); pick the language in the launcher.
 - Windows 10 or 11 (64-bit) and a GPU with Direct3D 12 support.
 - About 10 GB of free disk space and 16 GB of RAM.
 

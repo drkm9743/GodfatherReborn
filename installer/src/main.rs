@@ -32,7 +32,9 @@ USAGE
                                              copy a PS3 disc image's files (decrypting 1:1 dumps)
 
 OPTIONS
-  --game DIR        your game dump: the folder that contains PS3_GAME
+  --game DIR        your game dump: the folder that contains PS3_GAME (BLES00043)
+  --lang-game DIR   (optional, repeatable) a French / Italian / German / Spanish disc dump (BLES00044 / 45 / 46 / 47):
+                    only its language files are used, on top of BLES00043
   --rpcs3 EXE       rpcs3.exe, used to decrypt EBOOT.BIN if there is no EBOOT.elf yet
   --python EXE      Python 3.10+ to use (default: py launcher / python on PATH)
   --root DIR        the port checkout (default: found from the installer's location)
@@ -56,6 +58,7 @@ OPTIONS
 struct Opts {
     cmd: String,
     game: Option<PathBuf>,
+    lang_games: Vec<PathBuf>,
     rpcs3: Option<PathBuf>,
     python: Option<PathBuf>,
     root: Option<PathBuf>,
@@ -106,6 +109,7 @@ fn parse_args() -> Result<Opts> {
             }
             "-h" | "--help" => o.cmd = "help".into(),
             "--game" => o.game = Some(val(&mut i, &a)?.into()),
+            "--lang-game" => o.lang_games.push(val(&mut i, &a)?.into()),
             "--rpcs3" => o.rpcs3 = Some(val(&mut i, &a)?.into()),
             "--python" => o.python = Some(val(&mut i, &a)?.into()),
             "--root" => o.root = Some(val(&mut i, &a)?.into()),
@@ -347,7 +351,7 @@ fn eboot_hash_check(s: &Session, elf: &Path, lock: Option<&lock::Lock>) -> Resul
         expected.push(e);
     }
     if !expected.is_empty() && !expected.contains(&sha) {
-        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BLES00043 or BLES00047, v1.01 disc executable)";
+        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BLES00043, v1.01 disc executable)";
         if !s.o.force {
             bail!("{msg}.\n    --force tries anyway; expect the patch step to fail.");
         }
@@ -451,6 +455,16 @@ fn cmd_install(s: &Session) -> Result<()> {
             let kept = restore_mtimes(&before);
             util::info(&format!("{kept} of {} generated file(s) unchanged by this update (they will not be recompiled)", before.len()));
         }
+    }
+
+    for lg in &s.o.lang_games {
+        util::heading("Language pack");
+        let lu = game::locate(lg)?.usrdir;
+        let tool = s.root.join(&s.m.port).join("tools").join("gf_langpack_build.py");
+        let out = s.root.join(&s.m.port).join("langpack");
+        let st = std::process::Command::new(&py).arg(&tool).arg(&g.usrdir).arg(&lu).arg(&out).status()
+            .ctx(|| format!("running {}", tool.display()))?;
+        if !st.success() { bail!("the language pack from {} could not be built", lg.display()); }
     }
 
     if s.o.no_build {
