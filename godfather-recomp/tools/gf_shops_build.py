@@ -11,7 +11,7 @@ import gf_seats_build as sb
 SHOP = re.compile(r'smoke|quack|bakery|florist|butcher|liquor|liqour|bar_|nightclub|^rest|_rest', re.I)
 def interiors(wt):
     seen = {}
-    for f in sorted(glob.glob(os.path.join(wt, '**', '*.str'), recursive=True)):
+    for f in sorted(glob.glob(os.path.join(glob.escape(wt), '**', '*.str'), recursive=True)):
         rel = os.path.relpath(f, wt).replace('\\', '/').split('/')
         if len(rel) < 3: continue
         leaf = rel[2][:-4] if rel[2].endswith('.str') else rel[2]
