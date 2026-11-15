@@ -89,9 +89,18 @@ def localised(src, bsrc):
     if not os.path.isfile(bsrc): return False
     a, b = text_of(src), text_of(bsrc)
     if a is None or b is None or a == b: return False
-    if not same_layout(src, bsrc):
-        return False   # streamed files are only usable when laid out exactly like the BLES00043 ones
     return True
+
+def stoc_sections(d):
+    """(decompressed, buffer, file region, start) of each section of an SToc file."""
+    if d[:4] != b'SToc': return None
+    return [struct.unpack('>4I', d[0x14 + 24 * i + 8:0x14 + 24 * i + 24]) for i in range(d[8])]
+
+def fits_streaming(src, bsrc):
+    """The world streaming reserves each section's buffer and file region from the BLES00043 copy: a replacement
+    must have the same sections and need no more of either (a bigger one is waited for forever)."""
+    a, b = stoc_sections(open(src, 'rb').read(0x800)), stoc_sections(open(bsrc, 'rb').read(0x800))
+    return bool(a) and b is not None and len(a) == len(b) and all(x[1] <= y[1] and x[2] <= y[2] for x, y in zip(a, b))
 
 def same_layout(a, b):
     """Same size, same SToc header and the same chunk positions."""
@@ -190,7 +199,8 @@ def main(base, lang, out, eng_dialogue=None):
             # A file the kept BLES00043 world containers stream must stay laid out exactly as theirs expect (the game
             # otherwise waits for its data forever: igc_act01_n01_02 shot 9, t1_alley/t1_set_2). String tables are
             # looked up by ID instead and are handled above.
-            if low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc):
+            if (low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc)
+                    and not fits_streaming(src, bsrc)):
                 held += 1; continue
             take = (low == 'text/localetable.txt' or rel in FROM_LANG or low.startswith('godfather_v4/globalfolder/ui/')
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
@@ -206,7 +216,7 @@ def main(base, lang, out, eng_dialogue=None):
             if rel not in ('langpack.txt', 'gf_dialogue.txt', 'gf_prompts.txt') and rel not in want:
                 try: os.remove(os.path.join(root, f))
                 except OSError as e: print('could not remove %s: %s' % (rel, e))
-    print('kept %d BLES00043 files the world streaming tables depend on' % held)
+    print('kept %d BLES00043 files whose language-disc copy does not fit the world streaming buffers' % held)
     nd = dialogue_lines(eng_dialogue, lang, code, os.path.join(lang, 'godfather_v4', 'text', ln['godfather_v4'][0] + '.str'), out)
     if nd: print('street dialogue: %d lines' % nd)
     npr = gf_prompts_lang.build([os.path.join(lang, d, 'text', ln[d][0] + '.str') for d in ('godfather_v4', 'frontend') if d in ln],
