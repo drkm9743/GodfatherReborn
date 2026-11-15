@@ -19,7 +19,10 @@ langpack/<code> for the launcher's language):
   **/dlg/**                          per-language dialogue data
   **/missions/** that differ         mission scripts and cutscenes with their subtitles inside
 Map, model and character files are never taken from the language disc.
-usage: python gf_langpack_build.py <BLES00043 USRDIR> <language disc USRDIR> <langpack dir>  (writes <langpack dir>/<code>)"""
+  gf_dialogue.txt                    the street-dialogue lines (gf_dialogue.c) with that language's voices and subtitles,
+                                     made from the port's English list (optional 4th argument) by stream name
+usage: python gf_langpack_build.py <BLES00043 USRDIR> <language disc USRDIR> <langpack dir> [assets/gf_dialogue.txt]
+       (writes <langpack dir>/<code>)"""
 import os, re, sys, shutil, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gf_str, gf_refpack
@@ -80,7 +83,36 @@ def put(src, dst):
     try: os.link(src, dst)                       # same volume: no extra space
     except OSError: shutil.copy2(src, dst)
 
-def main(base, lang, out):
+def mission_hash(t):
+    x = 0
+    for c in t.encode('latin1'):
+        if 65 <= c <= 90: c += 32
+        x = ((x << 6) + (x << 16) - x + c) & 0xFFFFFFFF
+    return x
+
+def lh2_strings(path):
+    """{key: text} of a string table (gf_dialogue_build.py layout)."""
+    u = next(u for o, u in gf_str.chunks(path))
+    n = struct.unpack('>I', u[0xA0:0xA4])[0]
+    keys = struct.unpack('>%dI' % n, u[0xB0:0xB0 + 4 * n]); offs = struct.unpack('>%dI' % n, u[0xB0 + 4 * n:0xB0 + 8 * n])
+    return {k: u[0x90 + o:u.index(b'\0', 0x90 + o)].decode('cp1252', 'replace') for k, o in zip(keys, offs)}
+
+def dialogue_lines(eng_txt, lang, code, table, out):
+    if not eng_txt or not os.path.isfile(eng_txt): return 0
+    tr = lh2_strings(table); VO = code.upper(); rows = []
+    for l in open(eng_txt, encoding='latin1'):
+        if l.startswith('#') or l.count('\t') < 3: continue
+        cat, spk, path, text = l.rstrip('\r\n').split('\t', 3)
+        stem = os.path.basename(path)[:-8] if path.endswith('.exa.snu') else os.path.basename(path)
+        t = tr.get(mission_hash(stem), '').strip()
+        if len(t) < 2 or t == '_' or not os.path.isfile(os.path.join(lang, 'audiostreams', VO, path)): continue
+        rows.append('\t'.join((cat, spk, VO + '/' + path, t)))
+    with open(os.path.join(out, 'gf_dialogue.txt'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write('# gf_dialogue.txt (%s) -- made by tools/gf_langpack_build.py from the English list: category<TAB>speaker<TAB>audiostreams path<TAB>subtitle\n' % code)
+        for r in rows: f.write(r + '\n')
+    return len(rows)
+
+def main(base, lang, out, eng_dialogue=None):
     bt, lt = localetable(base), localetable(lang)
     if len(bt) < 3 or bt[1] != 'BLES00043': sys.exit('the base game must be BLES00043 (found %s)' % (bt[1] if len(bt) > 1 else '?'))
     if len(lt) < 3 or lt[1] not in LANG_DISCS: sys.exit('the language disc must be one of %s (found %s)' % (', '.join(LANG_DISCS), lt[1] if len(lt) > 1 else '?'))
@@ -119,13 +151,15 @@ def main(base, lang, out):
     for root, dirs, files in os.walk(out):
         for f in files:
             rel = os.path.relpath(os.path.join(root, f), out).replace(os.sep, '/')
-            if rel != 'langpack.txt' and rel not in want:
+            if rel not in ('langpack.txt', 'gf_dialogue.txt') and rel not in want:
                 try: os.remove(os.path.join(root, f))
                 except OSError as e: print('could not remove %s: %s' % (rel, e))
+    nd = dialogue_lines(eng_dialogue, lang, code, os.path.join(lang, 'godfather_v4', 'text', ln['godfather_v4'][0] + '.str'), out)
+    if nd: print('street dialogue: %d lines' % nd)
     with open(os.path.join(out, 'langpack.txt'), 'w') as f:
         f.write('%s %s %d files\n' % (lt[1], code, n))
     print('language pack %s (%s): %d files, %.1f GB -> %s' % (code, lt[1], n, size / 2**30, out))
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4: sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    if len(sys.argv) not in (4, 5): sys.exit(__doc__)
+    main(*sys.argv[1:])

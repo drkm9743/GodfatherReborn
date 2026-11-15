@@ -462,7 +462,8 @@ fn cmd_install(s: &Session) -> Result<()> {
         let lu = game::locate(lg)?.usrdir;
         let tool = s.root.join(&s.m.port).join("tools").join("gf_langpack_build.py");
         let out = s.root.join(&s.m.port).join("langpack");
-        let st = std::process::Command::new(&py).arg(&tool).arg(&g.usrdir).arg(&lu).arg(&out).status()
+        let st = std::process::Command::new(&py).arg(&tool).arg(&g.usrdir).arg(&lu).arg(&out)
+            .arg(s.root.join(&s.m.port).join("assets").join("gf_dialogue.txt")).status()
             .ctx(|| format!("running {}", tool.display()))?;
         if !st.success() { bail!("the language pack from {} could not be built", lg.display()); }
     }

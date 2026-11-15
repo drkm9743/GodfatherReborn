@@ -121,6 +121,9 @@ static const char* lang_pack_dir(void)
     return dir[0] ? dir : NULL;
 }
 
+/* The language pack folder in use, or NULL (port code that opens game files itself, e.g. gf_dialogue.c). */
+const char* ps3_fs_lang_pack_dir(void) { return lang_pack_dir(); }
+
 void ps3_vfs_ps3game_fallback(char* path, size_t cap)
 {
     struct stat st;
