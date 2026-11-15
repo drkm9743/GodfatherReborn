@@ -1254,11 +1254,48 @@ static void nv3089_blit(void)
     u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
              : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
     u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
+    /* GF_BLIT_FAST=1 (code default 0 = old per-pixel vm_read/vm_write): the rows of this scaled copy are
+     * plain byte moves (a read-swap followed by a write-swap of the same width cancels out), but every pixel
+     * paid a coherence call + a swap pair + a reservation test; the profile has this loop at ~11 % of the
+     * FIFO thread in rain / fire / explosion scenes. Per row: when no 128-byte line of the destination span
+     * is SPU-reserved and the row is outside the write-watch window, copy through host pointers (memmove for
+     * 1:1 rows, raw element copies for scaled ones) and break PPU reservations once per line. Otherwise that
+     * row takes the old path, so the guest-visible result is the same. */
+    static int s_blit_fast = -1;
+    if (s_blit_fast < 0) { const char* e = getenv("GF_BLIT_FAST"); s_blit_fast = (e && *e == '1') ? 1 : 0;
+                           if (s_blit_fast) fprintf(stderr, "[GF_BLIT_FAST] NV3089 scaled blit: host-pointer rows ON\n"); }
     for (u32 y = 0; y < out_h; y++) {
         u32 dy = out_y + y;
         if (dy < cy0 || dy >= cy1) continue;
         u64 sv = ((u64)v0 << 8) + (u64)y * s_nv3089.dt_dy;         /* 20.12 */
         u32 sy = (u32)(sv >> 20);
+        if (s_blit_fast) {
+            u32 xa = 0, xb = out_w;                                   /* clipped x range of this row */
+            if (out_x < cx0) xa = cx0 - out_x;
+            if (cx1 != 0xFFFFFFFFu) { u32 lim = (cx1 > out_x) ? cx1 - out_x : 0; if (lim < xb) xb = lim; }
+            if (xa >= xb) continue;
+            const u32 d0 = dst + dy * dst_pitch + (out_x + xa) * bpp;
+            const u32 d1 = d0 + (xb - xa) * bpp;                      /* exclusive */
+            int ok = !(d0 < g_ww_hi && d1 > g_ww_lo);
+            for (u32 l = d0 & ~127u; ok && l < d1; l += 128u) if (spu_coh_is_reserved(l)) ok = 0;
+            if (ok) {
+                uint8_t* hd = vm_ptr8(d0);
+                const u32 srow = src + sy * in_pitch;
+                if (s_nv3089.ds_dx == (1u << 20)) {
+                    const u32 sx0 = (u32)((((u64)u0 << 8) + (u64)xa * s_nv3089.ds_dx) >> 20);
+                    memmove(hd, vm_ptr8(srow + sx0 * bpp), (size_t)(xb - xa) * bpp);
+                } else {
+                    for (u32 x = xa; x < xb; x++, hd += bpp) {
+                        const u32 sx = (u32)((((u64)u0 << 8) + (u64)x * s_nv3089.ds_dx) >> 20);
+                        const uint8_t* hs = vm_ptr8(srow + sx * bpp);
+                        if (bpp == 4) memcpy(hd, hs, 4); else if (bpp == 2) memcpy(hd, hs, 2); else *hd = *hs;
+                    }
+                }
+                if (g_resv_store_active > 0)
+                    for (u32 l = d0 & ~127u; l < d1; l += 128u) ppu_resv_break_store(l < d0 ? d0 : l);
+                continue;
+            }
+        }
         for (u32 x = 0; x < out_w; x++) {
             u32 dx = out_x + x;
             if (dx < cx0 || dx >= cx1) continue;
