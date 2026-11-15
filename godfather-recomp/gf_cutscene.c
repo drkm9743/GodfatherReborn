@@ -107,7 +107,11 @@ static int is_seq(uint32_t o) { return ea_ok(o) && rd32(o) == SEQ_VT; }
 static int s_allshots = -1;
 static int allshots(void)
 {
-    if (s_allshots < 0) { const char* e = getenv("GF_SKIP_ALLSHOTS"); s_allshots = !(e && *e == '0');
+    if (s_allshots < 0) { const char* e = getenv("GF_SKIP_ALLSHOTS");
+        /* With a language pack the fast replay can stall for good on a shot (BLES00047: shot 9/20 of
+         * igc_act01_n01_02, the scene after the Johnny prologue), so the pack defaults to the direct jump. */
+        extern const char* ps3_fs_lang_pack_dir(void);
+        s_allshots = (e && *e) ? *e != '0' : ps3_fs_lang_pack_dir() == NULL;
         printf("[skip-seq] v1049K skip plays every shot fast (all events fire): %s (GF_SKIP_ALLSHOTS)\n", s_allshots ? "ON" : "off"); fflush(stdout); }
     return s_allshots;
 }
