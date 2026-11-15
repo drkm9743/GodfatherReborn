@@ -100,7 +100,11 @@ def fits_streaming(src, bsrc):
     """The world streaming reserves each section's buffer and file region from the BLES00043 copy: a replacement
     must have the same sections and need no more of either (a bigger one is waited for forever)."""
     a, b = stoc_sections(open(src, 'rb').read(0x800)), stoc_sections(open(bsrc, 'rb').read(0x800))
-    return bool(a) and b is not None and len(a) == len(b) and all(x[1] <= y[1] and x[2] <= y[2] for x, y in zip(a, b))
+    if not (bool(a) and b is not None and len(a) == len(b) and all(x[1] <= y[1] and x[2] <= y[2] for x, y in zip(a, b))):
+        return False
+    x, y = open(src, 'rb').read(), open(bsrc, 'rb').read()   # and the chunks where the BLES00043 copy has them
+    pos = lambda d: [m.start() for m in re.finditer(rb'\x10\xfb', d)]
+    return len(x) == len(y) and pos(x) == pos(y)
 
 def same_layout(a, b):
     """Same size, same SToc header and the same chunk positions."""
