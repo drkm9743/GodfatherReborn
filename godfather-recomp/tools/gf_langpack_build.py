@@ -163,7 +163,7 @@ def text_only_diff(ra, rb_):
     so they fail the share test and stay BLES00043."""
     try: x, y = gf_str.refpack(ra, 0), gf_str.refpack(rb_, 0)
     except Exception: return False
-    return text_share(x) >= 0.6 and text_share(y) >= 0.6
+    return True   # terrain is kept by path (world_terrain/ is never fitted); the share test rejected every menu section
 
 def fit_into_base(src, bsrc):
     """The BLES00043 file with each section whose texts differ replaced by the language disc's section, placed in the
@@ -306,7 +306,7 @@ def main(base, lang, out, eng_dialogue=None):
             # looked up by ID instead and are handled above.
             if (low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc)
                     and not fits_streaming(src, bsrc)):
-                data = fit_into_base(src, bsrc) if (low.endswith('.str') and '/world_terrain/' not in '/' + low) else None
+                data = fit_into_base(src, bsrc) if (low.endswith('.str') and 'world_terrain' not in low) else None
                 if not data: held += 1; continue
                 dst = os.path.join(out, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if not (os.path.isfile(dst) and open(dst, 'rb').read() == data):
