@@ -19,7 +19,8 @@ langpack/<code> for the launcher's language):
   audiostreams/<XX>/**               the dubbed voices
   movies/*.vp6 that differ           the loading movie and the narrated training videos
   **/dlg/**                          per-language dialogue data
-  **/missions/** that differ         mission scripts and cutscenes with their subtitles inside
+  **/missions/** with other texts    mission scripts and cutscenes whose embedded subtitles / lines differ (files that
+                                     differ only in layout stay BLES00043, see localised())
 Map, model and character files are never taken from the language disc.
   gf_prompts.txt                     PC versions of the SIXAXIS motion prompts (tools/gf_prompts_lang.py, gf_prompts.c)
   gf_dialogue.txt                    the street-dialogue lines (gf_dialogue.c) with that language's voices and subtitles,
@@ -69,6 +70,34 @@ def retag_table(src, base_tab):
     if mu != mv: sys.exit('string table identity blocks differ in size: %s / %s' % (src, base_tab))
     u[0x10:mu] = v[0x10:mv]
     return gf_refpack.stoc_single(d, bytes(u))      # recompressed: the game decompresses the chunk in place
+
+STR_RE = re.compile(rb'[ -~]{6,}')
+def text_of(path):
+    """Printable strings of a .str file's chunks, without the build-machine paths (they name pal_en / pal_es)."""
+    out = set()
+    try:
+        for o, u in gf_str.chunks(path):
+            out.update(x for x in STR_RE.findall(u) if b'build' not in x.lower() and b'pal_' not in x.lower())
+    except Exception:
+        return None
+    return out
+
+def localised(src, bsrc):
+    """A mission / cutscene file whose own texts differ (embedded subtitles, mission lines). Files that differ only
+    in layout must stay BLES00043: the world streaming tables list where each chunk of a streamed file lies, and a
+    language disc's copy of the same shot is laid out differently (the game then waits for it forever)."""
+    if not os.path.isfile(bsrc): return False
+    a, b = text_of(src), text_of(bsrc)
+    if a is None or b is None or a == b: return False
+    if '_shot' in os.path.basename(src).lower() and not same_layout(src, bsrc):
+        return False   # a streamed cutscene shot: only usable when laid out exactly like the BLES00043 one
+    return True
+
+def same_layout(a, b):
+    """Same size, same SToc header and the same chunk positions."""
+    x, y = open(a, 'rb').read(), open(b, 'rb').read()
+    if len(x) != len(y) or x[:0x800] != y[:0x800]: return False
+    return [m.start() for m in re.finditer(rb'\x10\xfb', x)] == [m.start() for m in re.finditer(rb'\x10\xfb', y)]
 
 def same(a, b):
     if os.path.getsize(a) != os.path.getsize(b): return False
@@ -148,7 +177,8 @@ def main(base, lang, out, eng_dialogue=None):
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
                     or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and parts[1] == code.upper())
                     or '/dlg/' in '/' + low
-                    or ((parts[0].lower() == 'movies' or '/missions/' in '/' + low) and not (os.path.isfile(bsrc) and same(src, bsrc))))
+                    or (parts[0].lower() == 'movies' and not (os.path.isfile(bsrc) and same(src, bsrc)))
+                    or ('/missions/' in '/' + low and low.endswith('.str') and localised(src, bsrc)))
             if take: add(src, rel)
     # files of an earlier pack layout that this one no longer has
     for root, dirs, files in os.walk(out):
