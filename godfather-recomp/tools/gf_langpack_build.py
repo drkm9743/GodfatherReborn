@@ -112,6 +112,33 @@ def same_layout(a, b):
     if len(x) != len(y) or x[:0x800] != y[:0x800]: return False
     return [m.start() for m in re.finditer(rb'\x10\xfb', x)] == [m.start() for m in re.finditer(rb'\x10\xfb', y)]
 
+def stoc_raw_sections(d):
+    """(entry bytes, file bytes) of each section of a multi-section SToc container (sections follow the 2 KB header)."""
+    first = struct.unpack('>I', d[0x10:0x14])[0]; n = d[8]; off = 0x800; out = []
+    for i in range(n):
+        e = d[first + 24 * i:first + 24 * i + 24]
+        rg = struct.unpack('>I', e[16:20])[0]
+        out.append((e, d[off:off + rg])); off += rg
+    return out
+
+def hybrid_container(base_file, lang_file):
+    """The BLES00043 container, with the sections that hold fonts (FFN 'FONT' resources) taken from the language disc:
+    each disc's fonts only carry its own language's letters, while the rest (the streamed model lists among it) must
+    stay as BLES00043 has it."""
+    a, b = open(base_file, 'rb').read(), open(lang_file, 'rb').read()
+    if a[:4] != b'SToc' or b[:4] != b'SToc' or a[8] != b[8] or a[0x10:0x14] != b[0x10:0x14]: return None
+    sa, sb = stoc_raw_sections(a), stoc_raw_sections(b)
+    hdr = bytearray(a[:0x800]); body = bytearray(); first = struct.unpack('>I', a[0x10:0x14])[0]; took = 0
+    for i, ((ea, ra), (eb, rb_)) in enumerate(zip(sa, sb)):
+        use_lang = False
+        if rb_[:2] == b'\x10\xfb':
+            try: use_lang = b'FONT\x00\x00' in gf_str.refpack(rb_, 0)
+            except Exception: use_lang = False
+        e, r = (eb, rb_) if use_lang else (ea, ra)
+        took += use_lang
+        hdr[first + 24 * i:first + 24 * i + 24] = e; body += r
+    return (bytes(hdr) + bytes(body)) if took else None
+
 def kept_stream_names(base, from_lang):
     """Files the BLES00043 containers that stay in place (godfather_v4_global.str, the district .str / *_global.str)
     stream by name: 'godfather\\missions\\...\\t1_set_2' -> 'godfather_v4/godfather/missions/.../t1_set_2.str'."""
@@ -197,6 +224,15 @@ def main(base, lang, out, eng_dialogue=None):
     # disc they described 223 files laid out differently: freezes on loading NPCs / cars), so they stay BLES00043 and
     # their English string tables get the re-tagged language tables like the district ones.
     FROM_LANG = {'frontend/frontend.str'}
+    for rel in ('godfather_v4/godfather_global_global.str', 'wb_mobface_final/wb_mobface_final_global.str'):
+        if not (os.path.isfile(os.path.join(base, rel)) and os.path.isfile(os.path.join(lang, rel))): continue
+        data = hybrid_container(os.path.join(base, rel), os.path.join(lang, rel))
+        if not data: continue
+        dst = os.path.join(out, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if not (os.path.isfile(dst) and open(dst, 'rb').read() == data):
+            if os.path.isfile(dst): os.remove(dst)
+            with open(dst, 'wb') as f: f.write(data)
+        want.add(rel); n += 1; size += len(data)
     streamed = kept_stream_names(base, FROM_LANG)
     held = 0
     for root, dirs, files in os.walk(lang):
