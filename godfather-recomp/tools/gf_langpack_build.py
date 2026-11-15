@@ -7,6 +7,8 @@ there replaces the base disc's file at the same path (ps3recomp runtime/syscalls
 langpack/<code> for the launcher's language):
   text/localetable.txt               which language the game loads
   */text/*.str                       the string tables (menus, HUD, subtitles)
+  godfather_v4/GlobalFolder/ui/**    the pause menus, map screen, accomplishments and promotion screens (their texts
+                                     are built in)
   frontend/frontend.str, godfather_v4/godfather_global_global.str, wb_mobface_final/wb_mobface_final_global.str
                                      the menus and the fonts (each disc's fonts only carry its own language's
                                      letters) and the index of the string tables
@@ -142,7 +144,7 @@ def main(base, lang, out, eng_dialogue=None):
             src = os.path.join(root, f); rel = os.path.relpath(src, lang).replace(os.sep, '/'); parts = rel.split('/')
             low = rel.lower(); bsrc = os.path.join(base, rel)
             if rel in want: continue
-            take = (low == 'text/localetable.txt' or rel in FROM_LANG
+            take = (low == 'text/localetable.txt' or rel in FROM_LANG or low.startswith('godfather_v4/globalfolder/ui/')
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
                     or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and parts[1] == code.upper())
                     or '/dlg/' in '/' + low
