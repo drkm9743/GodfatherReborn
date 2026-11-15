@@ -139,6 +139,47 @@ def hybrid_container(base_file, lang_file):
         hdr[first + 24 * i:first + 24 * i + 24] = e; body += r
     return (bytes(hdr) + bytes(body)) if took else None
 
+SEC_TEXT = re.compile(rb'[ -~]{6,}')
+def section_texts(raw):
+    try: u = gf_str.refpack(raw, 0) if raw[:2] == b'\x10\xfb' else b''
+    except Exception: return None
+    return {x for x in SEC_TEXT.findall(u) if b'build' not in x.lower() and b'pal_' not in x.lower()}
+
+def fit_into_base(src, bsrc):
+    """The BLES00043 file with each section whose texts differ replaced by the language disc's section, placed in the
+    BLES00043 slot: same file region (so every chunk stays where the streaming tables expect it) and no bigger buffer.
+    The language disc's compressed stream is reused; the in-place start is recomputed for the BLES00043 buffer.
+    None when a text section does not fit."""
+    a, b = open(bsrc, 'rb').read(), open(src, 'rb').read()
+    if a[:4] != b'SToc' or b[:4] != b'SToc' or a[8] != b[8]: return None
+    sa, sb = stoc_raw_sections(a), stoc_raw_sections(b)
+    out = bytearray(a); first = struct.unpack('>I', a[0x10:0x14])[0]; off = 0x800; changed = 0
+    for i, ((ea, ra), (eb, rb_)) in enumerate(zip(sa, sb)):
+        h0, f0, dec0, al0, rg0, st0 = struct.unpack('>6I', ea)
+        ta, tb = section_texts(ra), section_texts(rb_)
+        if ta is not None and tb is not None and ta != tb:
+            h1, f1, dec1, al1, rg1, st1 = struct.unpack('>6I', eb)
+            if rb_[:2] != b'\x10\xfb': return None
+            def place(stream):
+                clen = len(stream.rstrip(bytes(1)))   # without the region's zero padding (a shorter guess is safe)
+                try: gap = gf_refpack.in_place_gap(stream, dec1)
+                except Exception: return None
+                need = (max(dec1 - clen, -gap) + 0x1F) & ~0x1F
+                if dec1 > al0 or need + rg0 > al0 or clen > rg0: return None
+                return need
+            stream = rb_; need = place(stream)
+            if need is None:   # the language disc's stream needs a little more room: ours decodes in place more tightly
+                try: stream = gf_refpack.compress(gf_str.refpack(rb_, 0), chain=256)
+                except Exception: return None
+                need = place(stream)
+                if need is None: return None
+            slot = stream[:rg0] + bytes(max(0, rg0 - len(stream)))
+            out[off:off + rg0] = slot
+            struct.pack_into('>6I', out, first + 24 * i, h1, f1, dec1, al0, rg0, need)
+            changed += 1
+        off += rg0
+    return bytes(out) if changed else None
+
 def kept_stream_names(base, from_lang):
     """Files the BLES00043 containers that stay in place (godfather_v4_global.str, the district .str / *_global.str)
     stream by name: 'godfather\\missions\\...\\t1_set_2' -> 'godfather_v4/godfather/missions/.../t1_set_2.str'."""
@@ -234,7 +275,7 @@ def main(base, lang, out, eng_dialogue=None):
             with open(dst, 'wb') as f: f.write(data)
         want.add(rel); n += 1; size += len(data)
     streamed = kept_stream_names(base, FROM_LANG)
-    held = 0
+    held = fitted = 0
     for root, dirs, files in os.walk(lang):
         for f in files:
             src = os.path.join(root, f); rel = os.path.relpath(src, lang).replace(os.sep, '/'); parts = rel.split('/')
@@ -245,7 +286,13 @@ def main(base, lang, out, eng_dialogue=None):
             # looked up by ID instead and are handled above.
             if (low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc)
                     and not fits_streaming(src, bsrc)):
-                held += 1; continue
+                data = fit_into_base(src, bsrc) if low.endswith('.str') else None
+                if not data: held += 1; continue
+                dst = os.path.join(out, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if not (os.path.isfile(dst) and open(dst, 'rb').read() == data):
+                    if os.path.isfile(dst): os.remove(dst)
+                    with open(dst, 'wb') as fo: fo.write(data)
+                want.add(rel); n += 1; size += len(data); fitted += 1; continue
             take = (low == 'text/localetable.txt' or rel in FROM_LANG or low.startswith('godfather_v4/globalfolder/ui/')
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
                     or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and parts[1] == code.upper())
@@ -260,7 +307,7 @@ def main(base, lang, out, eng_dialogue=None):
             if rel not in ('langpack.txt', 'gf_dialogue.txt', 'gf_prompts.txt') and rel not in want:
                 try: os.remove(os.path.join(root, f))
                 except OSError as e: print('could not remove %s: %s' % (rel, e))
-    print('kept %d BLES00043 files whose language-disc copy does not fit the world streaming buffers' % held)
+    print('streamed files: %d re-laid out into the BLES00043 slots, %d kept from BLES00043 (did not fit)' % (fitted, held))
     nd = dialogue_lines(eng_dialogue, lang, code, os.path.join(lang, 'godfather_v4', 'text', ln['godfather_v4'][0] + '.str'), out)
     if nd: print('street dialogue: %d lines' % nd)
     npr = gf_prompts_lang.build([os.path.join(lang, d, 'text', ln[d][0] + '.str') for d in ('godfather_v4', 'frontend') if d in ln],
