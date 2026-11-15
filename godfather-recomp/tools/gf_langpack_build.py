@@ -192,7 +192,11 @@ def main(base, lang, out, eng_dialogue=None):
                 if os.path.isfile(dst): os.remove(dst)
                 with open(dst, 'wb') as f: f.write(data)
             want.add(rel); n += 1; size += len(data)
-    FROM_LANG = {'frontend/frontend.str', 'godfather_v4/godfather_global_global.str', 'wb_mobface_final/wb_mobface_final_global.str'}
+    # Only the menus come whole from the language disc. godfather_global_global.str / wb_mobface_final_global.str also
+    # list the streamed character, vehicle and world models with their BLES00043-specific layouts (from the language
+    # disc they described 223 files laid out differently: freezes on loading NPCs / cars), so they stay BLES00043 and
+    # their English string tables get the re-tagged language tables like the district ones.
+    FROM_LANG = {'frontend/frontend.str'}
     streamed = kept_stream_names(base, FROM_LANG)
     held = 0
     for root, dirs, files in os.walk(lang):
