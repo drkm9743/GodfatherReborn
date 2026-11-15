@@ -8,20 +8,34 @@ langpack/<code> for the launcher's language):
   text/localetable.txt               which language the game loads
   */text/*.str                       the string tables (menus, HUD, subtitles)
   frontend/frontend.str              the menus, and the index of the frontend string tables
-  godfather_v4/godfather_global_global.str, wb_mobface_final/wb_mobface_final_global.str
-                                     the index of the in-game string tables (each table is found by an ID stored
-                                     inside it, so the index must come from the same disc as the tables); apart from
-                                     that index these two match BLES00043 except for build paths
+  <dir>/*.str that index text       the containers that list the string tables (godfather_global_global.str,
+                                     godfather_v4_global.str, the district *_global.str, wb_mobface_final_global.str):
+                                     each table is found by an ID stored inside it, so its index must come from the
+                                     same disc as the tables; apart from that they match BLES00043 except for build paths
   audiostreams/<XX>/**               the dubbed voices
   movies/*.vp6 that differ           the loading movie and the narrated training videos
   **/dlg/**                          per-language dialogue data
   **/missions/** that differ         mission scripts and cutscenes with their subtitles inside
 Map, model and character files are never taken from the language disc.
 usage: python gf_langpack_build.py <BLES00043 USRDIR> <language disc USRDIR> <langpack dir>  (writes <langpack dir>/<code>)"""
-import os, sys, shutil
+import os, re, sys, shutil
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gf_str
 
 LANG_DISCS = {'BLES00044': 'fr', 'BLES00045': 'it', 'BLES00046': 'de', 'BLES00047': 'es'}
-INDEXES = {'frontend/frontend.str', 'godfather_v4/godfather_global_global.str', 'wb_mobface_final/wb_mobface_final_global.str'}
+TEXT_REF = re.compile(rb'text[\x5c/][0-9A-F]{8}')
+
+def text_indexes(usr):
+    """Top-level .str files (next to a text/ folder) that list string tables."""
+    out = set()
+    for d in sorted(os.listdir(usr)):
+        dd = os.path.join(usr, d)
+        if not os.path.isdir(os.path.join(dd, 'text')): continue
+        for f in sorted(os.listdir(dd)):
+            if not f.lower().endswith('.str'): continue
+            for o, u in gf_str.chunks(os.path.join(dd, f)):
+                if TEXT_REF.search(u): out.add(d + '/' + f); break
+    return out
 
 def localetable(usr):
     p = os.path.join(usr, 'text', 'localetable.txt')
@@ -38,6 +52,9 @@ def same(a, b):
 
 def put(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.isfile(dst):
+        if os.path.samefile(src, dst) or (os.path.getsize(dst) == os.path.getsize(src) and same(src, dst)): return
+        os.remove(dst)
     try: os.link(src, dst)                       # same volume: no extra space
     except OSError: shutil.copy2(src, dst)
 
@@ -48,7 +65,8 @@ def main(base, lang, out):
     code = LANG_DISCS[lt[1]]
     if lt[2] != 'pal_' + code: print('note: %s says %s' % (lt[1], lt[2]))
     out = os.path.join(os.path.abspath(out), code)
-    if os.path.isdir(out): shutil.rmtree(out)
+    INDEXES = text_indexes(lang)
+    print('string-table indexes:', ', '.join(sorted(INDEXES)))
     n = size = 0
     for root, dirs, files in os.walk(lang):
         for f in files:
