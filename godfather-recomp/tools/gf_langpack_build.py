@@ -145,6 +145,26 @@ def section_texts(raw):
     except Exception: return None
     return {x for x in SEC_TEXT.findall(u) if b'build' not in x.lower() and b'pal_' not in x.lower()}
 
+def text_marks(d):
+    """1 for each byte inside a printable run of at least 6 characters (string table text), else 0."""
+    mk = bytearray(len(d))
+    for m in SEC_TEXT.finditer(d):
+        mk[m.start():m.end()] = b'\x01' * (m.end() - m.start())
+    return mk
+
+def text_share(d):
+    """Fraction of a section's bytes that sit inside printable string runs (string tables are mostly text)."""
+    if not d: return 0.0
+    return sum(m.end() - m.start() for m in SEC_TEXT.finditer(d)) / len(d)
+
+def text_only_diff(ra, rb_):
+    """True for sections that are string tables in both builds (mostly printable text): their texts may differ in
+    length, and the whole section is replaced. Terrain / model sections are mostly binary (black streets when taken),
+    so they fail the share test and stay BLES00043."""
+    try: x, y = gf_str.refpack(ra, 0), gf_str.refpack(rb_, 0)
+    except Exception: return False
+    return text_share(x) >= 0.6 and text_share(y) >= 0.6
+
 def fit_into_base(src, bsrc):
     """The BLES00043 file with each section whose texts differ replaced by the language disc's section, placed in the
     BLES00043 slot: same file region (so every chunk stays where the streaming tables expect it) and no bigger buffer.
@@ -157,7 +177,7 @@ def fit_into_base(src, bsrc):
     for i, ((ea, ra), (eb, rb_)) in enumerate(zip(sa, sb)):
         h0, f0, dec0, al0, rg0, st0 = struct.unpack('>6I', ea)
         ta, tb = section_texts(ra), section_texts(rb_)
-        if ta is not None and tb is not None and ta != tb:
+        if ta is not None and tb is not None and ta != tb and text_only_diff(ra, rb_):
             h1, f1, dec1, al1, rg1, st1 = struct.unpack('>6I', eb)
             if rb_[:2] != b'\x10\xfb': return None
             def place(stream):
@@ -286,7 +306,7 @@ def main(base, lang, out, eng_dialogue=None):
             # looked up by ID instead and are handled above.
             if (low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc)
                     and not fits_streaming(src, bsrc)):
-                data = fit_into_base(src, bsrc) if low.endswith('.str') else None
+                data = fit_into_base(src, bsrc) if (low.endswith('.str') and '/world_terrain/' not in '/' + low) else None
                 if not data: held += 1; continue
                 dst = os.path.join(out, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
                 if not (os.path.isfile(dst) and open(dst, 'rb').read() == data):

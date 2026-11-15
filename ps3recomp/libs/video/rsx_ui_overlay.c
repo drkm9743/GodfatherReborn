@@ -2555,8 +2555,8 @@ static void skip_build(void)
     const float a = s_skip_a, k = vis == 2 ? 1.0f : g_skip_progress;
     const int kbm = g_input_kbm > 0;
     const float sz = 24.0f, isz = 30.0f, pad = 16.0f;
-    const char* t1 = vis == 2 ? "Skipping..." : "Hold";
-    const char* t2 = vis == 2 ? "" : "to skip";
+    const char* t1 = vis == 2 ? ui_tr("Skipping...") : ui_tr("Hold");
+    const char* t2 = vis == 2 ? "" : ui_tr("to skip");
     const unsigned ico = kbm ? 0xF100u : 0xF083u;
     const UGlyph* g = vis == 2 ? NULL : glyph(ico, 1);
     const float iw = g ? g->w * (isz / s_iline) : 0.0f;

@@ -106,7 +106,7 @@ static const UiTr k_es[] = {
     { "\"%s\" is not a usable address", "\"%s\" no es una dirección válida" },
     /* street dialogue */
     { "Say hello", "Saludar" }, { "What's the word?", "¿Qué se cuenta?" }, { "Intimidate", "Intimidar" }, { "Flirt", "Ligar" },
-    { "Talk", "Hablar" }, { "Leaderboards", "Clasificaciones" }, { "Co-op", "Cooperativo" }, { "You", "Tú" }, { "TALK", "HABLAR" }, { "T  TALK", "T  HABLAR" },
+    { "Talk", "Hablar" }, { "Hold", "Mantén" }, { "to skip", "para saltar" }, { "Leaderboards", "Clasificaciones" }, { "Co-op", "Cooperativo" }, { "You", "Tú" }, { "TALK", "HABLAR" }, { "T  TALK", "T  HABLAR" },
     /* misc HUD */
     { "Skipping...", "Saltando..." }, { "Hold", "Mantén" }, { "NO AMMO", "SIN MUNICIÓN" }, { "EMPTY", "VACÍO" },
     { "Weapon", "Arma" }, { "QUICK SLOTS", "ACCESOS RÁPIDOS" }, { "MOUSE  SELECT", "RATÓN  ELEGIR" }, { "R  SELECT", "R  ELEGIR" },
