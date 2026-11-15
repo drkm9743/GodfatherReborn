@@ -19,13 +19,14 @@ langpack/<code> for the launcher's language):
   **/dlg/**                          per-language dialogue data
   **/missions/** that differ         mission scripts and cutscenes with their subtitles inside
 Map, model and character files are never taken from the language disc.
+  gf_prompts.txt                     PC versions of the SIXAXIS motion prompts (tools/gf_prompts_lang.py, gf_prompts.c)
   gf_dialogue.txt                    the street-dialogue lines (gf_dialogue.c) with that language's voices and subtitles,
                                      made from the port's English list (optional 4th argument) by stream name
 usage: python gf_langpack_build.py <BLES00043 USRDIR> <language disc USRDIR> <langpack dir> [assets/gf_dialogue.txt]
        (writes <langpack dir>/<code>)"""
 import os, re, sys, shutil, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gf_str, gf_refpack
+import gf_str, gf_refpack, gf_prompts_lang
 
 LANG_DISCS = {'BLES00044': 'fr', 'BLES00045': 'it', 'BLES00046': 'de', 'BLES00047': 'es'}
 TREF = re.compile(rb'(\w+)[\x5c/]text[\x5c/]([0-9A-F]{8})')
@@ -151,11 +152,14 @@ def main(base, lang, out, eng_dialogue=None):
     for root, dirs, files in os.walk(out):
         for f in files:
             rel = os.path.relpath(os.path.join(root, f), out).replace(os.sep, '/')
-            if rel not in ('langpack.txt', 'gf_dialogue.txt') and rel not in want:
+            if rel not in ('langpack.txt', 'gf_dialogue.txt', 'gf_prompts.txt') and rel not in want:
                 try: os.remove(os.path.join(root, f))
                 except OSError as e: print('could not remove %s: %s' % (rel, e))
     nd = dialogue_lines(eng_dialogue, lang, code, os.path.join(lang, 'godfather_v4', 'text', ln['godfather_v4'][0] + '.str'), out)
     if nd: print('street dialogue: %d lines' % nd)
+    npr = gf_prompts_lang.build([os.path.join(lang, d, 'text', ln[d][0] + '.str') for d in ('godfather_v4', 'frontend') if d in ln],
+                                code, os.path.join(out, 'gf_prompts.txt'))
+    if npr: print('PC versions of %d SIXAXIS prompts' % npr)
     with open(os.path.join(out, 'langpack.txt'), 'w') as f:
         f.write('%s %s %d files\n' % (lt[1], code, n))
     print('language pack %s (%s): %d files, %.1f GB -> %s' % (code, lt[1], n, size / 2**30, out))
