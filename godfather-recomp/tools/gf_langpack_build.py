@@ -89,8 +89,8 @@ def localised(src, bsrc):
     if not os.path.isfile(bsrc): return False
     a, b = text_of(src), text_of(bsrc)
     if a is None or b is None or a == b: return False
-    if '_shot' in os.path.basename(src).lower() and not same_layout(src, bsrc):
-        return False   # a streamed cutscene shot: only usable when laid out exactly like the BLES00043 one
+    if not same_layout(src, bsrc):
+        return False   # streamed files are only usable when laid out exactly like the BLES00043 ones
     return True
 
 def same_layout(a, b):
@@ -98,6 +98,18 @@ def same_layout(a, b):
     x, y = open(a, 'rb').read(), open(b, 'rb').read()
     if len(x) != len(y) or x[:0x800] != y[:0x800]: return False
     return [m.start() for m in re.finditer(rb'\x10\xfb', x)] == [m.start() for m in re.finditer(rb'\x10\xfb', y)]
+
+def kept_stream_names(base, from_lang):
+    """Files the BLES00043 containers that stay in place (godfather_v4_global.str, the district .str / *_global.str)
+    stream by name: 'godfather\\missions\\...\\t1_set_2' -> 'godfather_v4/godfather/missions/.../t1_set_2.str'."""
+    names = set(); d = os.path.join(base, 'godfather_v4')
+    for f in sorted(os.listdir(d)):
+        rel = 'godfather_v4/' + f
+        if not f.lower().endswith('.str') or rel in from_lang: continue
+        for o, u in gf_str.chunks(os.path.join(d, f)):
+            for m in re.finditer(rb'(?:^|\x00)([A-Za-z0-9_]+(?:\\[A-Za-z0-9_.]+)+)(?=\x00)', u):
+                names.add(('godfather_v4/' + m.group(1).decode('latin1').replace('\\', '/') + '.str').lower())
+    return names
 
 def same(a, b):
     if os.path.getsize(a) != os.path.getsize(b): return False
@@ -168,11 +180,18 @@ def main(base, lang, out, eng_dialogue=None):
                 with open(dst, 'wb') as f: f.write(data)
             want.add(rel); n += 1; size += len(data)
     FROM_LANG = {'frontend/frontend.str', 'godfather_v4/godfather_global_global.str', 'wb_mobface_final/wb_mobface_final_global.str'}
+    streamed = kept_stream_names(base, FROM_LANG)
+    held = 0
     for root, dirs, files in os.walk(lang):
         for f in files:
             src = os.path.join(root, f); rel = os.path.relpath(src, lang).replace(os.sep, '/'); parts = rel.split('/')
             low = rel.lower(); bsrc = os.path.join(base, rel)
             if rel in want: continue
+            # A file the kept BLES00043 world containers stream must stay laid out exactly as theirs expect (the game
+            # otherwise waits for its data forever: igc_act01_n01_02 shot 9, t1_alley/t1_set_2). String tables are
+            # looked up by ID instead and are handled above.
+            if low in streamed and '/text/' not in low and os.path.isfile(bsrc) and not same_layout(src, bsrc):
+                held += 1; continue
             take = (low == 'text/localetable.txt' or rel in FROM_LANG or low.startswith('godfather_v4/globalfolder/ui/')
                     or (len(parts) >= 2 and parts[-2].lower() == 'text' and low.endswith('.str'))
                     or (parts[0].lower() == 'audiostreams' and len(parts) > 2 and parts[1] == code.upper())
@@ -187,6 +206,7 @@ def main(base, lang, out, eng_dialogue=None):
             if rel not in ('langpack.txt', 'gf_dialogue.txt', 'gf_prompts.txt') and rel not in want:
                 try: os.remove(os.path.join(root, f))
                 except OSError as e: print('could not remove %s: %s' % (rel, e))
+    print('kept %d BLES00043 files the world streaming tables depend on' % held)
     nd = dialogue_lines(eng_dialogue, lang, code, os.path.join(lang, 'godfather_v4', 'text', ln['godfather_v4'][0] + '.str'), out)
     if nd: print('street dialogue: %d lines' % nd)
     npr = gf_prompts_lang.build([os.path.join(lang, d, 'text', ln[d][0] + '.str') for d in ('godfather_v4', 'frontend') if d in ln],
