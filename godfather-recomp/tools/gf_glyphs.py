@@ -148,12 +148,12 @@ KBM_CLASSIC = {  # v1130P "PC Classic" scheme (the original EA PC port's keys)
     'SELECT_TXT': lambda w, h: g_text(w, h, 'N'), 'SELECT_BTN': lambda w, h: g_key(w, h, 'N', square=False, scale=0.95),
     'START_TXT': lambda w, h: g_text(w, h, 'ESC'), 'START_BTN': lambda w, h: g_key(w, h, 'ESC', square=False, scale=0.95),
     'R1': lambda w, h: g_mouse(w, h, 'L'), 'L1': lambda w, h: g_mouse(w, h, 'R'),
-    'R2': lambda w, h: g_key(w, h, 'V'), 'L2': lambda w, h: g_key(w, h, 'ALT', scale=0.86),
-    'RS': lambda w, h: g_mouse(w, h), 'LS': lambda w, h: g_wasd(w, h), 'R3_A': lambda w, h: g_key(w, h, 'F'),
+    'R2': lambda w, h: g_key(w, h, 'V/F', scale=0.86), 'L2': lambda w, h: g_key(w, h, 'ALT', scale=0.86),
+    'RS': lambda w, h: g_mouse(w, h), 'LS': lambda w, h: g_wasd(w, h), 'R3_A': lambda w, h: g_key(w, h, 'F/V', scale=0.86),
     'RS_U': lambda w, h: g_mouse(w, h, arrow='u'), 'LS_N': lambda w, h: g_wasd(w, h), 'LS_U': lambda w, h: g_wasd(w, h, 'W'),
     'LS_L': lambda w, h: g_wasd(w, h, 'A'), 'LS_R': lambda w, h: g_wasd(w, h, 'D'), 'L3': lambda w, h: g_key(w, h, 'X'),
     'LS_D': lambda w, h: g_wasd(w, h, 'S'), 'RS_L': lambda w, h: g_mouse(w, h, arrow='l'), 'RS_R': lambda w, h: g_mouse(w, h, arrow='r'),
-    'R3_B': lambda w, h: g_key(w, h, 'F'), 'RS_D': lambda w, h: g_mouse(w, h, arrow='d'), 'DPAD': lambda w, h: g_arrows(w, h),
+    'R3_B': lambda w, h: g_key(w, h, 'F/V', scale=0.86), 'RS_D': lambda w, h: g_mouse(w, h, arrow='d'), 'DPAD': lambda w, h: g_arrows(w, h),
 }
 
 def is_yellow(p): return p[3] > 40 and p[0] > 150 and p[1] > 110 and p[2] < 110 and p[0] - p[2] > 80

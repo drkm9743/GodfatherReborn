@@ -1296,6 +1296,7 @@ int (*volatile g_pad_namekb_seq_fn)(void) = 0;
 /* v1043Y: title hook, nonzero = a menu is up over the game (Godfather: pause menu, gf_prompts.c) -> WASD = d-pad */
 int (*volatile g_pad_menu_fn)(void) = 0;
 int (*volatile g_pad_incar_fn)(void) = 0;
+float (*volatile g_pad_car_speed_fn)(void) = 0;   /* v1130T gf_combat.c: player's car speed m/s, < 0 unknown */
 int (*volatile g_pad_shop_fn)(void) = 0;   /* v1130Q gf_dialogue.c: 1 = the weapon dealer's buy screen is up, 2 = its Yes / No pop-up (v1130R) */
 static int s_shop_popup = 0;
 static int s_shop_ptr = 0;                  /* v1130Q: PC Classic buy screen with the mouse (free pointer) */
@@ -2773,7 +2774,7 @@ static void pad_poll_kbm_generic(int merge)
                   /* v1130S quantity: the whole "VENTA: n" line and its arrows (x 800..990): upper half = +1, lower half = -1 */
                   else if (x >= 800.0f && x <= 990.0f && y >= 334.0f && y < 354.0f) { hit = CELL_PAD_CTRL_UP; what = "quantity +"; }
                   else if (x >= 800.0f && x <= 990.0f && y >= 354.0f && y <= 376.0f) { hit = CELL_PAD_CTRL_DOWN; what = "quantity -"; }
-                  if (s_shop_popup) {   /* v1130R the pop-up: walk to the line, confirm with Cross */
+                  if (s_shop_popup && !(y >= 508.0f && y <= 552.0f)) {   /* v1130R the pop-up: walk to the line, confirm with Cross (v1130T: the bars stay clickable -- bribe and other F2F menus) */
                       hit = 0; what = "nothing";
                       if (x >= 517.0f && x <= 763.0f && y >= 326.0f && y < 355.0f) { hit = CELL_PAD_CTRL_UP; hit2 = CELL_PAD_CTRL_CROSS; what = "yes"; }
                       else if (x >= 517.0f && x <= 763.0f && y >= 355.0f && y <= 386.0f) { hit = CELL_PAD_CTRL_DOWN; hit2 = CELL_PAD_CTRL_CROSS; what = "no"; }
@@ -2962,21 +2963,26 @@ static void pad_poll_kbm_generic(int merge)
               const int left = acx < 0.0f; if (left) pad_motion_trigger(MOT_LEFT); else pad_motion_trigger(MOT_RIGHT);
               fl_end = t + 250ull; fl_x = left ? -127.0f : 127.0f; fl_y = 0.0f; acx = acy = 0.0f;
           }
-          if (cmb_grab) {
+          if (cmb_grab && !rst && shift && ((q && !pq) || (e && !pe))) { rst = 1; rst_t0 = t; rst_x = q && !e ? 90.0f : (e && !q ? -90.0f : 0.0f); }   /* v1130T: Shift+Q/E grabbing = threaten (stick back) ...; v1130U Q left fist (up-right), E right fist (up-left) */
+          else if (cmb_grab && rst) {
+              if (!(q || e) || !shift) { rst = 0; fl_end = t + (unsigned long long)power_ms; fl_x = rst_x; fl_y = rst_x != 0.0f ? -90.0f : -127.0f;   /* ... punch on release of Q/E or Shift (v1130V: diagonal on the fist's side) */
+                  printf("[combat] v1130T grab power punch %s (%llu ms threaten)\n", rst_x > 0.0f ? "left fist" : rst_x < 0.0f ? "right fist" : "both", t - rst_t0); fflush(stdout); }
+          } else if (cmb_grab) {
               /* v1130O: Q / E while grabbing = up-left / up-right too (the grab attacks / hooks the tutorial asks for) */
-              if (q && !pq) { fl_end = t + (unsigned long long)flick_ms; fl_x = e ? 0.0f : -90.0f; fl_y = -90.0f; printf("[combat] v1130O grab attack Q\n"); fflush(stdout); }
-              if (e && !pe) { fl_end = t + (unsigned long long)flick_ms; fl_x = q ? 0.0f : 90.0f; fl_y = -90.0f; printf("[combat] v1130O grab attack E\n"); fflush(stdout); }
-              rst = 0;
-          } else if (!rst && shift && ((q && !pq) || (e && !pe))) { rst = 1; rst_t0 = t; rst_x = q && !e ? -90.0f : (e && !q ? 90.0f : 0.0f); }   /* v1130N: Shift+Q/E press = power attack: stick down (charge) ... */
-          else if (rst && !(q || e) && t - rst_t0 >= (unsigned long long)down_ms) {   /* ... held at least PAD_KBM_POWER_DOWN_MS (longer while the key is held = charge), then up */
+              if (q && !pq) { fl_end = t + (unsigned long long)flick_ms; fl_x = e ? 0.0f : 90.0f; fl_y = -90.0f; printf("[combat] v1130O grab attack Q\n"); fflush(stdout); }
+              if (e && !pe) { fl_end = t + (unsigned long long)flick_ms; fl_x = q ? 0.0f : -90.0f; fl_y = -90.0f; printf("[combat] v1130O grab attack E\n"); fflush(stdout); }
+          } else if (!rst && shift && ((q && !pq) || (e && !pe))) { rst = 1; rst_t0 = t; rst_x = q && !e ? 90.0f : (e && !q ? -90.0f : 0.0f); }   /* v1130U: Q = left fist (up-right = left hook in this game), E = right; v1130N: Shift+Q/E press = power attack: stick down (charge) ... */
+          else if (rst && (!(q || e) || !shift) && t - rst_t0 >= (unsigned long long)down_ms) {   /* v1130T: releasing Shift fires too */   /* ... held at least PAD_KBM_POWER_DOWN_MS (longer while the key is held = charge), then up */
               rst = 0; fl_end = t + (unsigned long long)power_ms; fl_x = rst_x; fl_y = -127.0f;
               printf("[combat] v1130N power attack (%llu ms charge)\n", t - rst_t0); fflush(stdout); }
-          else if ((q && !pq) || (e && !pe)) { fl_end = t + (unsigned long long)flick_ms; fl_x = q && !e ? -90.0f : (e && !q ? 90.0f : 0.0f); fl_y = q && e ? -127.0f : -90.0f;
-              printf("[combat] v1130O quick attack %s\n", q && !e ? "Q (up-left)" : e && !q ? "E (up-right)" : "up"); fflush(stdout); }
+          else if ((q && !pq) || (e && !pe)) { fl_end = t + (unsigned long long)flick_ms; fl_x = q && !e ? 90.0f : (e && !q ? -90.0f : 0.0f); fl_y = q && e ? -127.0f : -90.0f;
+              printf("[combat] v1130O quick attack %s\n", q && !e ? "Q (up-right, left fist)" : e && !q ? "E (up-left, right fist)" : "up"); fflush(stdout); }
           pq = q; pe = e;
           const int ku = KD(VK_UP), kd = KD(VK_DOWN), kl = KD(VK_LEFT), kr = KD(VK_RIGHT);
           if (ku || kd || kl || kr) { cmb_rs = 1; cmb_rx = (float)(kr - kl) * 127.0f; cmb_ry = (float)(kd - ku) * 127.0f; }   /* arrows = right stick */
-          else if (rst || t < ch_until) { cmb_rs = 1; cmb_rx = 0.0f; cmb_ry = 127.0f; }
+          else if (rst || t < ch_until) { cmb_rs = 1; static int gtx = -1, gty = 64; if (gtx < 0) { gtx = pad_envi("PAD_KBM_GRAB_TX", 110); gty = pad_envi("PAD_KBM_GRAB_TY", 64); }   /* v1130Y: the threaten stick decides the raised fist; 45 deg read as plain 'down' */
+              const int gs = rst && cmb_grab && rst_x != 0.0f;
+              cmb_rx = gs ? (rst_x > 0.0f ? (float)gtx : -(float)gtx) : 0.0f; cmb_ry = gs ? (float)gty : 127.0f; }   /* v1130V: grab threaten pulled back to the fist's side */
           else if (t < fl_end) { cmb_rs = 1; cmb_rx = fl_x; cmb_ry = fl_y; }
           else cmb_rs = 2;                                                              /* centred, mouse muted */
       } else { pq = pe = rst = 0; fl_end = ch_until = 0; acx = acy = 0.0f; }
@@ -3136,6 +3142,12 @@ static void pad_poll_kbm_generic(int merge)
           if (KD(VK_UP)) btns |= CELL_PAD_CTRL_CROSS;
           if (KD(VK_DOWN)) btns |= CELL_PAD_CTRL_SQUARE;
           if (KD(VK_RBUTTON) || KD(VK_LCONTROL)) { btns &= ~CELL_PAD_CTRL_L1; btns |= CELL_PAD_CTRL_CIRCLE; }
+          if (KD('V')) { btns &= ~CELL_PAD_CTRL_R2; btns |= CELL_PAD_CTRL_R3; }   /* v1130X EA PC car: V = look back (R3) ... */
+          if (KD('F')) { btns &= ~CELL_PAD_CTRL_R3; btns |= CELL_PAD_CTRL_R2; }   /* ... F = shoot from the car (R2); glyphs R2 = V/F, R3 = F/V */
+          { extern float (*volatile g_pad_car_speed_fn)(void);   /* v1130T: Space gets out only when the car is (almost) stopped */
+            static int sp_log = 0; const float v = g_pad_car_speed_fn ? g_pad_car_speed_fn() : -1.0f;
+            if (KD(VK_SPACE) && !KD('T') && v > 1.5f) { btns &= ~CELL_PAD_CTRL_TRIANGLE; if (!sp_log) { sp_log = 1; printf("[drive] v1130T Space ignored while moving (%.1f m/s)\n", v); fflush(stdout); } }
+            if (!KD(VK_SPACE)) sp_log = 0; }
           if (KD(VK_LBUTTON)) { btns &= ~CELL_PAD_CTRL_R1; btns |= CELL_PAD_CTRL_L3; }
           if (KD(VK_MBUTTON)) { btns &= ~CELL_PAD_CTRL_DOWN; btns |= CELL_PAD_CTRL_R3; }
       } }
@@ -3549,7 +3561,11 @@ static void pad_motion_controller(void)
     int hide = grab;
     if (m > 96 && armed) {
         const int fast = now - t_center <= (unsigned long long)flick_ms;
-        if (grab || fast) {
+        /* v1130Z (user: "locked on, the stick only punches now and then"): while only locked on (no grab) the up / down /
+         * diagonal flicks are the game's own punches, hooks and charge -- they are no gestures (the locked-on gestures are
+         * left / right = pistol whip, R3 = tilt, L3 = down). Only a mostly sideways flick is a gesture then. */
+        const int melee_flick = !grab && ay * 2 > ax;
+        if ((grab || fast) && !melee_flick) {
             armed = 0; hide_until = now + 250;
             int g = ay >= ax ? (dy < 0 ? MOT_FORWARD : MOT_BACK) : (dx < 0 ? MOT_LEFT : MOT_RIGHT);
             if (l3 && (g == MOT_LEFT || g == MOT_RIGHT)) { g = g == MOT_LEFT ? MOT_KNEE_L : MOT_KNEE_R; l3_used = 1; }

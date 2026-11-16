@@ -392,6 +392,7 @@ static void hk_pf_act(ppu_context* c)
     const uint32_t th = (uint32_t)c->gpr[3]; s_pf_sm = th;
     { const uint32_t act = (uint32_t)c->gpr[7];
       if (act == 0x3Eu) { s_pf_loop_t = GetTickCount64(); s_pf_latch = 1; }
+      else if (act == 0x2Du || act == 0x2Eu || act == 0x3Du) s_pf_latch = 1;   /* v1130T F2FActivate: every face-to-face menu (bribe, ...) */
       /* v1130R: the buy screen's own pop-ups ("Do you want to buy it? Yes / No") stop 0x3E -- stay latched until the F2F
        * goes back to Inactive / Valid (0x27 / 0x28 / 0x29) */
       else if (act == 0x27u || act == 0x28u || act == 0x29u) s_pf_latch = 0;
