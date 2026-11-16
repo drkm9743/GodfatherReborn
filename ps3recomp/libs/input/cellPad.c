@@ -3561,11 +3561,7 @@ static void pad_motion_controller(void)
     int hide = grab;
     if (m > 96 && armed) {
         const int fast = now - t_center <= (unsigned long long)flick_ms;
-        /* v1130Z (user: "locked on, the stick only punches now and then"): while only locked on (no grab) the up / down /
-         * diagonal flicks are the game's own punches, hooks and charge -- they are no gestures (the locked-on gestures are
-         * left / right = pistol whip, R3 = tilt, L3 = down). Only a mostly sideways flick is a gesture then. */
-        const int melee_flick = !grab && ay * 2 > ax;
-        if ((grab || fast) && !melee_flick) {
+        if (grab || fast) {
             armed = 0; hide_until = now + 250;
             int g = ay >= ax ? (dy < 0 ? MOT_FORWARD : MOT_BACK) : (dx < 0 ? MOT_LEFT : MOT_RIGHT);
             if (l3 && (g == MOT_LEFT || g == MOT_RIGHT)) { g = g == MOT_LEFT ? MOT_KNEE_L : MOT_KNEE_R; l3_used = 1; }
