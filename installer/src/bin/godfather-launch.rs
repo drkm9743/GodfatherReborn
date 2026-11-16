@@ -455,6 +455,14 @@ const MODS: &[Row] = &[
         names: &["On", "Off"],
         fallback: 0,
     },
+    Row {
+        key: "GF_GPS",
+        label: "GPS Route Line",
+        hint: "In a car, a line on the radar shows the way to your target. D-pad right or G: next target.",
+        vals: &["1", "0"],
+        names: &["On", "Off"],
+        fallback: 0,
+    },
 ];
 
 /// Order the in-game menu writes the keys in.

@@ -533,7 +533,10 @@ static void jw_sample(void)
          * back out before the frame is drawn: SetPosition (entity + physics body) back by the excess, the eye by the same vector.
          * Only for a clean forward lurch (along > 0.5 m, < 1.3 m, running > 2 m/s, dt < 60 ms). GF_UNLURCH=0 off. */
         { static int ul = -1; if (ul < 0) { ul = envi("GF_UNLURCH", 1); printf("[camjump] v1112I unlurch %s (GF_UNLURCH)\n", ul ? "ON" : "off"); fflush(stdout); }
-          if (ul && ev == 0 && along > 0.5f && dp < 1.3f && vlen > 2.0f && dt < 0.06) {
+          /* on foot only: in a car the "lurch" is just the car's speed (16-27 m/s in user logs) and SetPosition on the
+           * driver stopped the car dead at high speed. Skip in a vehicle (g_pad_incar_fn) and above running speed. */
+          extern int (*volatile g_pad_incar_fn)(void);
+          if (ul && ev == 0 && along > 0.5f && dp < 1.3f && vlen > 2.0f && vlen < 12.0f && dt < 0.06 && !(g_pad_incar_fn && g_pad_incar_fn())) {
               float ex = dp - vlen * (float)dt; if (ex > dp) ex = dp;
               if (ex > 0.35f) {
                   const float ux = dx / dp, uz = dz / dp, nx = p[0] - ux * ex, nz = p[2] - uz * ex;

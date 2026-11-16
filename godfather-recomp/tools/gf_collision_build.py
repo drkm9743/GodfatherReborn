@@ -138,6 +138,7 @@ def main(root, outp):
             for cz in range(tz0[i], tz1[i] + 1): cells[cz * nx + cx].append(i)
     starts = []; idx = []
     for c in cells: starts.append((len(idx), len(c))); idx += c
+    os.makedirs(os.path.dirname(os.path.abspath(outp)), exist_ok=True)   # a fresh install has no assets/ yet
     with open(outp, 'wb') as f:
         f.write(b'GFCOL1\0\0' + struct.pack('<3f3i', CELL, x0, z0, nx, nz, len(T)) + struct.pack('<i', len(idx)))
         f.write(T.astype('<f4').tobytes()); f.write(np.array(starts, '<i4').tobytes()); f.write(np.array(idx, '<i4').tobytes())

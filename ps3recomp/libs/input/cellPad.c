@@ -417,9 +417,289 @@ volatile unsigned g_pad_phys_buttons = 0;   /* v1093M: port 0 buttons as the dev
 volatile unsigned long long g_pad_phys_ms = 0;
 static int g_pf_stick_on = 0;
 
+/* ---- v1129RR PAD_RECORD=<file> / PAD_REPLAY=<file>: record every raw input, replay it exactly -----------------------
+ * (user: "make a launcher that copies every single thing I do, and use that as the benchmarker").
+ * RECORD: once per 4 ms input tick the host poll thread stores the raw inputs the rest of this file and the D3D12 window
+ * see: keyboard (256 keys, only while the game window has focus), Caps Lock, cursor position + client rect/origin,
+ * focus, the raw mouse counts the window received (pad_rr_mouse_in), and the controller states XInput/SDL3 produced
+ * (before the keyboard merge). A frame is written when anything changed. Times are QPC ms from the first input tick
+ * (segment 0: boot + menus) and from the benchmark world mark (segment 1: in the world, see pad_bench_world_mark).
+ * REPLAY: the same tick feeds the recorded state back through every reader (GetAsyncKeyState / GetKeyState /
+ * GetCursorPos / GetForegroundWindow / ScreenToClient / ClientToScreen / GetClientRect wrappers below, the raw mouse
+ * accumulators incl. gf_footcam's look counts, the controller states). The real keyboard, mouse and controllers are
+ * ignored; SetCursorPos / ClipCursor do nothing. Load-time drift: a frame that changes a key / click / controller
+ * button waits until the same menu is on screen (sig = name grid or menu item count, as at record time) up to
+ * PAD_REPLAY_GATE_MS (default 15000; PAD_REPLAY_GATE=0 = off). Segment 1 restarts its clock at the world mark.
+ * Both modes switch off PAD_AUTOPRESS, PAD_SCRIPT and BENCH_MOVE. Drift report: every 2 s in the world the player
+ * position (title hook g_pad_player_pos_fn) is stored; the replay logs its distance to the recorded one ([padrr]). */
+#ifdef _WIN32
+static int pad_envi(const char* n, int d);
+extern volatile long g_pad_raw_mdx, g_pad_raw_mdy, g_pad_raw_wheel, g_pad_raw_look_dx, g_pad_raw_look_dy;
+extern volatile int g_pad_raw_ok;
+extern volatile int g_gf_grid_valid, g_gf_mp_n;
+int (*volatile g_pad_player_pos_fn)(float* p) = 0;   /* title hook (Godfather: gf_shop.c) */
+typedef struct {
+    unsigned ofs;            /* ms into the segment */
+    unsigned char seg, flags; short sig;   /* flags: 1 focused, 2 Caps Lock on, 4 controller block follows, 8 raw mouse ok */
+    unsigned char keys[32];
+    int mdx, mdy, wheel;     /* raw mouse counts received during this tick */
+    int cx, cy, ox, oy, rw, rh;   /* cursor (screen), client origin (screen), client size */
+} RRFrame;
+typedef struct { unsigned ofs; unsigned char seg, pad_[3]; float p[3]; } RRPos;
+static int s_rr_mode = 0;    /* 0 off, 1 record, 2 replay */
+static FILE* s_rr_f = 0;
+static RRFrame s_rr_cur;     /* replay: state handed to the wrappers */
+static PadHostState s_rr_gp[PAD_MAX_HOST_PORTS];
+static volatile LONG s_rr_acc_dx = 0, s_rr_acc_dy = 0, s_rr_acc_wh = 0;
+static RRFrame* s_rr_fr = 0; static PadHostState* s_rr_frgp = 0; static int s_rr_n = 0, s_rr_i = 0;
+static unsigned short* s_rr_age = 0;   /* ms the frame's screen had been up at record time (cap 3000) */
+static RRPos* s_rr_pos = 0; static int s_rr_np = 0, s_rr_pi = 0;
+static double s_rr_t0 = 0.0, s_rr_t1 = 0.0, s_rr_pause[2] = { 0.0, 0.0 };
+static double rr_ms(void)
+{
+    static LARGE_INTEGER f; LARGE_INTEGER c; if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c); return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+static int rr_sig(void) { return g_gf_grid_valid ? 1000 : (g_gf_mp_n > 0 && g_gf_mp_n < 999 ? g_gf_mp_n : 0); }
+static BOOL CALLBACK rr_enum_cb(HWND h, LPARAM lp)
+{
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid); RECT r;
+    if (pid == GetCurrentProcessId() && IsWindowVisible(h) && GetClientRect(h, &r) && r.right > 64) { *(HWND*)lp = h; return FALSE; }
+    return TRUE;
+}
+static HWND rr_own_hwnd(void) { static HWND h = 0; if (!h || !IsWindow(h)) { h = 0; EnumWindows(rr_enum_cb, (LPARAM)&h); } return h ? h : (HWND)(intptr_t)1; }
+static void rr_close(void) { if (s_rr_f) { fflush(s_rr_f); fclose(s_rr_f); s_rr_f = 0; } }
+static void rr_init(void)
+{
+    static int done = 0; if (done) return; done = 1;
+    const char* rp = getenv("PAD_REPLAY"); const char* rc = getenv("PAD_RECORD");
+    char magic[8]; unsigned hd[4];
+    if (rp && *rp) {
+        FILE* f = fopen(rp, "rb");
+        if (!f || fread(magic, 1, 8, f) != 8 || memcmp(magic, "PADRR1\n", 8) || fread(hd, sizeof hd, 1, f) != 1 ||
+            hd[0] != 1 || hd[1] != sizeof(RRFrame) || hd[2] != sizeof(PadHostState) || hd[3] != PAD_MAX_HOST_PORTS) {
+            fprintf(stderr, "[padrr] v1129RR PAD_REPLAY: cannot use '%s' (missing or wrong format) -> replay OFF%c", rp, 10);
+            if (f) fclose(f); return;
+        }
+        int cap = 1 << 16, pcap = 1024; s_rr_fr = (RRFrame*)malloc(sizeof(RRFrame) * cap);
+        s_rr_frgp = (PadHostState*)malloc(sizeof(PadHostState) * PAD_MAX_HOST_PORTS * cap); s_rr_pos = (RRPos*)malloc(sizeof(RRPos) * pcap);
+        PadHostState gp[PAD_MAX_HOST_PORTS]; memset(gp, 0, sizeof gp);
+        int ty;
+        while (s_rr_fr && s_rr_frgp && s_rr_pos && (ty = fgetc(f)) != EOF) {
+            if (ty == 1) {
+                RRFrame fr; if (fread(&fr, sizeof fr, 1, f) != 1) break;
+                if ((fr.flags & 4) && fread(gp, sizeof gp, 1, f) != 1) break;
+                if (s_rr_n == cap) { cap *= 2; s_rr_fr = (RRFrame*)realloc(s_rr_fr, sizeof(RRFrame) * cap);
+                                     s_rr_frgp = (PadHostState*)realloc(s_rr_frgp, sizeof(PadHostState) * PAD_MAX_HOST_PORTS * cap); if (!s_rr_fr || !s_rr_frgp) break; }
+                s_rr_fr[s_rr_n] = fr; memcpy(&s_rr_frgp[s_rr_n * PAD_MAX_HOST_PORTS], gp, sizeof gp); s_rr_n++;
+            } else if (ty == 2) {
+                RRPos ps; if (fread(&ps, sizeof ps, 1, f) != 1) break;
+                if (s_rr_np == pcap) { pcap *= 2; s_rr_pos = (RRPos*)realloc(s_rr_pos, sizeof(RRPos) * pcap); if (!s_rr_pos) break; }
+                s_rr_pos[s_rr_np++] = ps;
+            } else break;
+        }
+        fclose(f);
+        if (!s_rr_fr || !s_rr_frgp || !s_rr_pos || s_rr_n == 0) { fprintf(stderr, "[padrr] v1129RR PAD_REPLAY: '%s' holds no input -> replay OFF%c", rp, 10); return; }
+        s_rr_age = (unsigned short*)malloc(sizeof(unsigned short) * s_rr_n);
+        if (!s_rr_age) { fprintf(stderr, "[padrr] v1129RR PAD_REPLAY: out of memory -> replay OFF%c", 10); return; }
+        { int sg = -1, sig = -99999; unsigned on = 0;
+          for (int i = 0; i < s_rr_n; i++) { const RRFrame* q = &s_rr_fr[i];
+              if (q->seg != sg || q->sig != sig) { sg = q->seg; sig = q->sig; on = q->ofs; }
+              const unsigned a = q->ofs - on; s_rr_age[i] = (unsigned short)(a > 3000u ? 3000u : a); } }
+        double m0 = 0.0, m1 = 0.0;
+        for (int i = 0; i < s_rr_n; i++) { if (s_rr_fr[i].seg == 0) m0 = s_rr_fr[i].ofs / 1000.0; else m1 = s_rr_fr[i].ofs / 1000.0; }
+        memset(&s_rr_cur, 0, sizeof s_rr_cur); memset(s_rr_gp, 0, sizeof s_rr_gp);
+        s_rr_mode = 2;
+        fprintf(stderr, "[padrr] v1129RR REPLAY <- %s: %d frames, %.1f s boot/menus + %.1f s in the world, %d positions (real keyboard / mouse / controllers ignored)%c",
+                rp, s_rr_n, m0, m1, s_rr_np, 10);
+    } else if (rc && *rc) {
+        s_rr_f = fopen(rc, "wb");
+        if (!s_rr_f) { fprintf(stderr, "[padrr] v1129RR PAD_RECORD: cannot write '%s' -> record OFF%c", rc, 10); return; }
+        setvbuf(s_rr_f, 0, _IOFBF, 1 << 20);
+        hd[0] = 1; hd[1] = sizeof(RRFrame); hd[2] = sizeof(PadHostState); hd[3] = PAD_MAX_HOST_PORTS;
+        fwrite("PADRR1\n", 1, 8, s_rr_f); fwrite(hd, sizeof hd, 1, s_rr_f); fflush(s_rr_f);
+        atexit(rr_close);
+        s_rr_mode = 1;
+        fprintf(stderr, "[padrr] v1129RR RECORD -> %s (every input until the game closes)%c", rc, 10);
+    }
+}
+/* D3D12 window / raw-input thread: one WM_INPUT mouse packet (replaces the direct adds there). */
+void pad_rr_mouse_in(long dx, long dy, long wheel)
+{
+    if (s_rr_mode == 2) return;   /* replay: the real mouse is ignored */
+    InterlockedExchangeAdd(&g_pad_raw_mdx, dx); InterlockedExchangeAdd(&g_pad_raw_mdy, dy);
+    InterlockedExchangeAdd(&g_pad_raw_look_dx, dx); InterlockedExchangeAdd(&g_pad_raw_look_dy, dy);
+    if (wheel) InterlockedExchangeAdd(&g_pad_raw_wheel, wheel);
+    if (s_rr_mode == 1) { InterlockedExchangeAdd(&s_rr_acc_dx, dx); InterlockedExchangeAdd(&s_rr_acc_dy, dy); if (wheel) InterlockedExchangeAdd(&s_rr_acc_wh, wheel); }
+    g_pad_raw_ok = 1;
+}
+static int rr_edge(const RRFrame* a, const PadHostState* ga, const RRFrame* b, const PadHostState* gb)
+{
+    if (memcmp(a->keys, b->keys, sizeof a->keys) || ((a->flags ^ b->flags) & 1)) return 1;
+    for (int p = 0; p < PAD_MAX_HOST_PORTS; p++) if (ga[p].buttons != gb[p].buttons || ga[p].connected != gb[p].connected) return 1;
+    return 0;
+}
+static void rr_apply(int i, int mouse)
+{
+    const RRFrame* f = &s_rr_fr[i];
+    if (mouse && (f->mdx || f->mdy)) {
+        InterlockedExchangeAdd(&g_pad_raw_mdx, f->mdx); InterlockedExchangeAdd(&g_pad_raw_mdy, f->mdy);
+        InterlockedExchangeAdd(&g_pad_raw_look_dx, f->mdx); InterlockedExchangeAdd(&g_pad_raw_look_dy, f->mdy);
+    }
+    if (mouse && f->wheel) InterlockedExchangeAdd(&g_pad_raw_wheel, f->wheel);
+    if (f->flags & 8) g_pad_raw_ok = 1;
+    s_rr_cur = *f;
+    memcpy(s_rr_gp, &s_rr_frgp[i * PAD_MAX_HOST_PORTS], sizeof s_rr_gp);
+}
+static RRFrame s_rr_rec, s_rr_last; static PadHostState s_rr_lastgp[PAD_MAX_HOST_PORTS]; static int s_rr_nw = 0;
+/* host poll thread, start of each input tick (before the controller and keyboard sweeps) */
+static void rr_tick_begin(void)
+{
+    if (!s_rr_mode) return;
+    const double now = rr_ms();
+    if (s_rr_t0 == 0.0) s_rr_t0 = now;
+    if (g_bench_world_ms && s_rr_t1 == 0.0) {
+        s_rr_t1 = now;
+        if (s_rr_mode == 2) {   /* world reached: menu input not played yet is folded in (state only) */
+            int skipped = 0; while (s_rr_i < s_rr_n && s_rr_fr[s_rr_i].seg == 0) { rr_apply(s_rr_i++, 0); skipped++; }
+            fprintf(stderr, "[padrr] v1129RR replay: world mark after %.1f s (%d menu frames left over, folded in)%c", (now - s_rr_t0) / 1000.0, skipped, 10);
+        }
+    }
+    const int seg = s_rr_t1 != 0.0;
+    const double base = seg ? s_rr_t1 : s_rr_t0;
+    if (s_rr_mode == 1) {
+        RRFrame* f = &s_rr_rec; memset(f, 0, sizeof *f);
+        f->seg = (unsigned char)seg; f->ofs = (unsigned)(now - base);
+        HWND fg = GetForegroundWindow(); DWORD pid = 0; if (fg) GetWindowThreadProcessId(fg, &pid);
+        const int foc = fg && pid == GetCurrentProcessId();
+        if (foc) { f->flags |= 1; for (int k = 1; k < 256; k++) if (GetAsyncKeyState(k) & 0x8000) f->keys[k >> 3] |= (unsigned char)(1u << (k & 7)); }
+        if (GetKeyState(VK_CAPITAL) & 1) f->flags |= 2;
+        if (g_pad_raw_ok) f->flags |= 8;
+        POINT p; if (GetCursorPos(&p)) { f->cx = p.x; f->cy = p.y; }
+        RECT r; POINT o = { 0, 0 };
+        if (foc && GetClientRect(fg, &r) && ClientToScreen(fg, &o)) { f->ox = o.x; f->oy = o.y; f->rw = r.right; f->rh = r.bottom; }
+        else { f->ox = s_rr_last.ox; f->oy = s_rr_last.oy; f->rw = s_rr_last.rw; f->rh = s_rr_last.rh; }
+        f->mdx = (int)InterlockedExchange(&s_rr_acc_dx, 0); f->mdy = (int)InterlockedExchange(&s_rr_acc_dy, 0); f->wheel = (int)InterlockedExchange(&s_rr_acc_wh, 0);
+        f->sig = (short)rr_sig();
+        return;
+    }
+    /* replay */
+    static int gate_on = -1, gate_ms = 15000; static double gate_t0 = 0.0; static int said_end = 0, ngate = 0;
+    if (gate_on < 0) { gate_on = pad_envi("PAD_REPLAY_GATE", 1); gate_ms = pad_envi("PAD_REPLAY_GATE_MS", 15000); }
+    static int live_sig = -99999; static double live_on = 0.0;
+    { const int ls = rr_sig(); if (ls != live_sig) { live_sig = ls; live_on = now; } }
+    const double clock = now - base - s_rr_pause[seg];
+    while (s_rr_i < s_rr_n && s_rr_fr[s_rr_i].seg == seg && (double)s_rr_fr[s_rr_i].ofs <= clock) {
+        const RRFrame* f = &s_rr_fr[s_rr_i];
+        if (gate_on && rr_edge(f, &s_rr_frgp[s_rr_i * PAD_MAX_HOST_PORTS], &s_rr_cur, s_rr_gp) &&
+            (f->sig != live_sig || now - live_on < (double)s_rr_age[s_rr_i])) {   /* same screen, up as long as when you pressed */
+            if (gate_t0 == 0.0) { gate_t0 = now;
+                if (ngate++ < 60) fprintf(stderr, "[padrr] v1129RR replay seg %d t=%.1f s: input waits for screen %d (now %d, up %.1f s, you pressed after %.1f s)%c", seg, f->ofs / 1000.0, f->sig, live_sig, (now - live_on) / 1000.0, s_rr_age[s_rr_i] / 1000.0, 10); }
+            if (now - gate_t0 < (double)gate_ms) { s_rr_pause[seg] = now - base - (double)f->ofs; break; }
+            fprintf(stderr, "[padrr] v1129RR replay: screen %d never came (%d ms) -> input played anyway%c", f->sig, gate_ms, 10);
+        } else if (gate_t0 != 0.0 && ngate <= 60) {
+            fprintf(stderr, "[padrr] v1129RR replay: screen %d up after %.1f s, input continues%c", f->sig, (now - gate_t0) / 1000.0, 10);
+        }
+        gate_t0 = 0.0;
+        rr_apply(s_rr_i++, 1);
+    }
+    if (s_rr_i >= s_rr_n && !said_end) {
+        said_end = 1;   /* end of the recording: release everything */
+        memset(s_rr_cur.keys, 0, sizeof s_rr_cur.keys);
+        for (int p = 0; p < PAD_MAX_HOST_PORTS; p++) { PadHostState* g = &s_rr_gp[p]; const int c = g->connected; memset(g, 0, sizeof *g);
+            g->connected = c; g->analog_lx = g->analog_ly = g->analog_rx = g->analog_ry = 128; }
+        fprintf(stderr, "[padrr] v1129RR replay finished (segment %d, %.1f s): all input released%c", seg, (now - base) / 1000.0, 10);
+    }
+}
+/* host poll thread, after the controller sweep (XInput / SDL3), before the keyboard merge */
+static void rr_tick_gamepad(void)
+{
+    if (!s_rr_mode) return;
+    const double now = rr_ms();
+    if (s_rr_mode == 1) {
+        RRFrame* f = &s_rr_rec;
+        const int gpch = memcmp(s_rr_lastgp, s_host_state, sizeof s_rr_lastgp) != 0 || s_rr_nw == 0;
+        RRFrame a = *f, b = s_rr_last; a.ofs = b.ofs = 0;
+        if (gpch || f->mdx || f->mdy || f->wheel || memcmp(&a, &b, sizeof a)) {
+            if (gpch) f->flags |= 4;
+            fputc(1, s_rr_f); fwrite(f, sizeof *f, 1, s_rr_f);
+            if (gpch) { fwrite(s_host_state, sizeof s_rr_lastgp, 1, s_rr_f); memcpy(s_rr_lastgp, s_host_state, sizeof s_rr_lastgp); }
+            s_rr_last = *f; s_rr_last.flags &= (unsigned char)~4; s_rr_last.mdx = s_rr_last.mdy = s_rr_last.wheel = 0; s_rr_nw++;
+        }
+        static double tf = 0.0; if (now - tf >= 500.0) { tf = now; fflush(s_rr_f); }
+    } else {
+        memcpy(s_host_state, s_rr_gp, sizeof s_rr_gp);   /* recorded controllers instead of the real ones */
+    }
+    /* route drift: player position every 2 s in the world */
+    static double tp = 0.0, maxd = 0.0, sumd = 0.0; static int nd = 0;
+    if (s_rr_t1 != 0.0 && g_pad_player_pos_fn && now - tp >= 2000.0) {
+        tp = now; float p[3];
+        if (g_pad_player_pos_fn(p)) {
+            const unsigned ofs = (unsigned)(now - s_rr_t1 - (s_rr_mode == 2 ? s_rr_pause[1] : 0.0));
+            if (s_rr_mode == 1) { RRPos ps; memset(&ps, 0, sizeof ps); ps.ofs = ofs; ps.seg = 1; memcpy(ps.p, p, sizeof ps.p); fputc(2, s_rr_f); fwrite(&ps, sizeof ps, 1, s_rr_f); }
+            else if (s_rr_np > 0) {
+                while (s_rr_pi + 1 < s_rr_np && s_rr_pos[s_rr_pi + 1].ofs <= ofs) s_rr_pi++;
+                const RRPos* q = &s_rr_pos[s_rr_pi];
+                const float dx = p[0] - q->p[0], dy = p[1] - q->p[1], dz = p[2] - q->p[2];
+                const double d = sqrt((double)(dx * dx + dy * dy + dz * dz));
+                if (d > maxd) maxd = d; sumd += d; nd++;
+                static double tl = 0.0;
+                if (now - tl >= 10000.0) { tl = now;
+                    fprintf(stderr, "[padrr] v1129RR route t=%.0f s: player %.1f %.1f %.1f, recorded %.1f %.1f %.1f -> drift %.1f m (mean %.1f, max %.1f)%c",
+                            ofs / 1000.0, (double)p[0], (double)p[1], (double)p[2], (double)q->p[0], (double)q->p[1], (double)q->p[2], d, sumd / nd, maxd, 10); }
+            }
+        }
+    }
+}
+/* reader wrappers (replay = the recorded state; otherwise the real call) */
+static SHORT rr_GetAsyncKeyState(int vk)
+{
+    if (s_rr_mode != 2) return GetAsyncKeyState(vk);
+    return (vk > 0 && vk < 256 && ((s_rr_cur.keys[vk >> 3] >> (vk & 7)) & 1)) ? (SHORT)0x8000 : (SHORT)0;
+}
+static SHORT rr_GetKeyState(int vk)
+{
+    if (s_rr_mode != 2) return GetKeyState(vk);
+    SHORT r = (vk > 0 && vk < 256 && ((s_rr_cur.keys[vk >> 3] >> (vk & 7)) & 1)) ? (SHORT)0x8000 : (SHORT)0;
+    if (vk == VK_CAPITAL && (s_rr_cur.flags & 2)) r |= 1;
+    return r;
+}
+static BOOL rr_GetCursorPos(LPPOINT p) { if (s_rr_mode != 2) return GetCursorPos(p); p->x = s_rr_cur.cx; p->y = s_rr_cur.cy; return TRUE; }
+static HWND rr_GetForegroundWindow(void) { if (s_rr_mode != 2) return GetForegroundWindow(); return (s_rr_cur.flags & 1) ? rr_own_hwnd() : (HWND)0; }
+static BOOL rr_ScreenToClient(HWND h, LPPOINT p) { if (s_rr_mode != 2) return ScreenToClient(h, p); p->x -= s_rr_cur.ox; p->y -= s_rr_cur.oy; return TRUE; }
+static BOOL rr_ClientToScreen(HWND h, LPPOINT p) { if (s_rr_mode != 2) return ClientToScreen(h, p); p->x += s_rr_cur.ox; p->y += s_rr_cur.oy; return TRUE; }
+static BOOL rr_GetClientRect(HWND h, LPRECT r)
+{
+    if (s_rr_mode != 2) return GetClientRect(h, r);
+    r->left = r->top = 0; r->right = s_rr_cur.rw; r->bottom = s_rr_cur.rh; return s_rr_cur.rw > 0;
+}
+static BOOL rr_SetCursorPos(int x, int y) { if (s_rr_mode == 2) return TRUE; return SetCursorPos(x, y); }
+static BOOL rr_ClipCursor(const RECT* r) { if (s_rr_mode == 2) return TRUE; return ClipCursor(r); }
+/* exported for title code (pad_rr.h) */
+SHORT pad_rr_GetAsyncKeyState(int vk) { return rr_GetAsyncKeyState(vk); }
+SHORT pad_rr_GetKeyState(int vk) { return rr_GetKeyState(vk); }
+HWND pad_rr_GetForegroundWindow(void) { return rr_GetForegroundWindow(); }
+#define GetAsyncKeyState rr_GetAsyncKeyState
+#define GetKeyState rr_GetKeyState
+#define GetCursorPos rr_GetCursorPos
+#define GetForegroundWindow rr_GetForegroundWindow
+#define ScreenToClient rr_ScreenToClient
+#define ClientToScreen rr_ClientToScreen
+#define GetClientRect rr_GetClientRect
+#define SetCursorPos rr_SetCursorPos
+#define ClipCursor rr_ClipCursor
+#else
+static int s_rr_mode = 0;
+static void rr_init(void) {}
+static void rr_tick_begin(void) {}
+static void rr_tick_gamepad(void) {}
+#endif
+/* ---- end v1129RR ---- */
+
 #ifdef _WIN32
 static int pad_host_window_focused(void)
 {
+    if (s_rr_mode == 2) return (s_rr_cur.flags & 1) != 0;   /* v1129RR replay: recorded focus */
     HWND fg = GetForegroundWindow();
     if (!fg) return 0;
     DWORD pid = 0;
@@ -1113,7 +1393,7 @@ static void nk_plan(int c)
 int pad_namekb_wm_key(unsigned vk, unsigned long lp)
 {
     static int wm = -1; if (wm < 0) wm = pad_envi("PAD_NAMEKB_WM", 1);
-    if (!s_nk.on || !wm) return 0;
+    if (!s_nk.on || !wm || s_rr_mode) return 0;   /* v1129RR: record / replay sample the keys per tick */
     const int rep = (lp & (1ul << 30)) != 0;
     if (vk >= 'A' && vk <= 'Z') {
         if (rep) return 1;
@@ -1166,7 +1446,7 @@ static int pad_namekb_poll(PadHostState* hs, int merge, int focused)
     if (focused) {
         unsigned char cur[256];
         for (int k = 0; k < 256; k++) cur[k] = (GetAsyncKeyState(k) & 0x8000) ? 1 : 0;
-        static int wm = -1; if (wm < 0) wm = pad_envi("PAD_NAMEKB_WM", 1);   /* v1043V: 1 = keys from WM_KEYDOWN */
+        static int wm = -1; if (wm < 0) wm = pad_envi("PAD_NAMEKB_WM", 1) && !s_rr_mode;   /* v1043V: 1 = keys from WM_KEYDOWN (v1129RR: off while recording / replaying) */
         if (!wm) {   /* old 4 ms sampling: keys pressed in the same poll come out in A-Z order, fast double letters lost */
         const int upper = cur[VK_SHIFT] ^ ((GetKeyState(VK_CAPITAL) & 1) != 0);
         for (int k = 'A'; k <= 'Z'; k++) if (cur[k] && !s_nk.prev[k]) nkc_push((k - 'A' + 'a') | (upper ? NKC_UPPER : 0));
@@ -2764,14 +3044,18 @@ static void pad_poll_backend_do(void)
     if (cost < 0) { const char* e = getenv("PAD_COST"); cost = (e && *e == '1'); QueryPerformanceFrequency(&cf); QueryPerformanceCounter(&c0); }
     LARGE_INTEGER t0, t1, t2; if (cost) QueryPerformanceCounter(&t0);
 #endif
+    rr_tick_begin();   /* v1129RR record / replay: raw keyboard, cursor, focus, mouse for this tick */
 #if PAD_BACKEND_XINPUT
+    if (s_rr_mode != 2) {   /* v1129RR replay: recorded controllers, the real ones are not read */
     pad_poll_xinput();
 #ifdef PS3RECOMP_SDL3
     pad_merge_sdl3();   /* PlayStation / Steam controllers into the ports XInput left empty */
 #endif
+    }
 #elif PAD_BACKEND_SDL2
-    pad_poll_sdl2();
+    if (s_rr_mode != 2) pad_poll_sdl2();
 #endif
+    rr_tick_gamepad();   /* v1129RR: controller states (record) / recorded ones (replay), drift report */
 #ifdef _WIN32
     if (cost) QueryPerformanceCounter(&t1);
     s_pad_xinput_merged = s_host_state[0].connected;
@@ -2976,6 +3260,7 @@ s32 cellPadInit(u32 max_connect)
         return CELL_PAD_ERROR_INVALID_PARAMETER;
 
     s_pad_initialized = 1;
+    rr_init();   /* v1129RR PAD_RECORD / PAD_REPLAY */
     s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
     memset(s_port_setting, 0, sizeof(s_port_setting));
     memset(s_host_state, 0, sizeof(s_host_state));
@@ -3522,7 +3807,7 @@ skip_inject: ;
      * (in-game it opens the pause menu), CROSS only for PAD_AUTOPRESS_GRACE_MS (default 12000) to clear a
      * post-load prompt, then no synthetic input at all. PAD_AUTOPRESS_FOREVER=1 = old endless pulses. */
     { static int s_ap = -1, s_forever = 0, s_grace = 12000; static unsigned s_apn = 0;
-      if (s_ap < 0) { s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
+      if (s_ap < 0) { s_ap = (getenv("PAD_AUTOPRESS") && !s_rr_mode) ? 1 : 0;   /* v1129RR: off while recording / replaying */
           const char* f = getenv("PAD_AUTOPRESS_FOREVER"); s_forever = f && *f == '1';
           const char* g = getenv("PAD_AUTOPRESS_GRACE_MS"); if (g && *g) s_grace = atoi(g); }
       /* v1043N PAD_AUTOPRESS_PAUSE=<from_s>:<to_s>: no autopress between those wall-clock seconds after the first poll
@@ -3568,7 +3853,7 @@ skip_inject: ;
       if (s_sc < 0) {
           s_sc = 0;
           const char* e = getenv("PAD_SCRIPT");
-          if (e && *e) {
+          if (e && *e && !s_rr_mode) {   /* v1129RR: off while recording / replaying */
               s_sc = 1; t0 = GetTickCount64();
               const char* p = e;
               while (*p && n_ev < 32) {
@@ -3743,7 +4028,7 @@ skip_inject: ;
      * so a benchmark exercises streaming and traversal instead of standing still. */
     if (port_no == 0 && g_bench_world_ms) {
         static int bm = -1, after = 15000, flipms = 6000;
-        if (bm < 0) { const char* e = getenv("BENCH_MOVE"); bm = e && *e == '1';
+        if (bm < 0) { const char* e = getenv("BENCH_MOVE"); bm = e && *e == '1' && !s_rr_mode;   /* v1129RR */
             const char* a = getenv("BENCH_MOVE_AFTER_MS"); if (a && *a) after = atoi(a);
             const char* f = getenv("BENCH_MOVE_FLIP_MS"); if (f && *f) flipms = atoi(f);
             if (flipms < 500) flipms = 500; }

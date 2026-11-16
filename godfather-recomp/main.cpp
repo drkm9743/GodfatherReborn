@@ -99,6 +99,7 @@ unsigned cellGcm_flip_request_count(void);
 #ifdef _WIN32
 /* v1031P: cellGcmSys.c -- wait up to ms for a FIFO kick (guest put store / dry ref poll). */
 void     cellGcm_fifo_kick_wait(unsigned ms);
+void*    cellGcm_fifo_kick_event(void);     /* v1129P: the auto-reset kick event the wait above uses */
 #endif
 }
 /* v1038P PS3_MAIN_THREAD_SETUP: ppu_loader.cpp (C++ linkage). Main guest thread -> HIGHEST priority on the P-cores
@@ -289,6 +290,55 @@ static void fb_report(void) {}
 #endif
 
 extern "C" int gf_resolve_target_fps(void);   /* v1042F, defined below */
+/* v1129P GF_CLOCK_SUBMS=1 (default 0 = old): with FRAME_CLOCK_QPC the idle wait is min(4, whole ms to the next tick), so
+ * for the last < 1 ms before every tick wait_ms is 0 and the loop spins wait(0) / walk / pump until the tick -- at a 190 Hz
+ * tick (target 180) up to ~19 % of a core and ~1 M no-op FIFO walk calls per 10 s, which also inflates [BUSY-FIFO]
+ * "FIFO walk". =1: that sub-ms remainder is slept on a high-resolution waitable timer due exactly at the tick, together
+ * with the FIFO kick event (a guest put store / dry fence poll still wakes the loop at once). Ticks, walks, flips and
+ * presents are the same; the loop only stops spinning in between. A kick coalesced while the previous walk ran can
+ * wait at most that remainder (< 1 ms). [v1129P] clock line every 10 s when PS3_BUSY=1. */
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static int gf_clock_subms_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("GF_CLOCK_SUBMS");
+        on = (e && *e == '1') ? 1 : 0;
+        if (on) fprintf(stderr, "[v1129P] frame clock sub-ms idle wait ON (GF_CLOCK_SUBMS: high-res timer + kick event instead of a spin)%c", 10);
+    }
+    return on;
+}
+static int gf_clock_subms_wait(double rem_ms)
+{
+    static HANDLE timer = NULL; static int bad = 0;
+    static unsigned long long n_wait = 0, n_kick = 0; static double t_rep = 0.0;
+    if (bad) return 0;
+    if (!timer) {
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!timer) { bad = 1; fprintf(stderr, "[v1129P] GF_CLOCK_SUBMS: no high-resolution timer -> old spin%c", 10); return 0; }
+    }
+    HANDLE ev = (HANDLE)cellGcm_fifo_kick_event();
+    if (!ev) return 0;
+    LARGE_INTEGER due; due.QuadPart = -(LONGLONG)(rem_ms * 1e4);   /* ms -> 100 ns units, relative */
+    if (due.QuadPart >= 0 || !SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) return 0;
+    HANDLE hs[2] = { ev, timer };
+    const DWORD r = WaitForMultipleObjects(2, hs, FALSE, 2);
+    if (r == WAIT_OBJECT_0) { n_kick++; CancelWaitableTimer(timer); }
+    n_wait++;
+    if (s_fb_on > 0) {
+        const double now = pace_now_ms();
+        if (t_rep == 0.0) t_rep = now;
+        else if (now - t_rep >= 10000.0) {
+            fprintf(stderr, "[v1129P] frame clock 10 s: %llu sub-ms timer waits (%llu woken by a kick)%c", n_wait, n_kick, 10);
+            t_rep = now; n_wait = n_kick = 0;
+        }
+    }
+    return 1;
+}
+#endif
 extern "C" volatile int g_gf_ffwd;              /* v1042S cellPad.c */
 extern "C" volatile int g_gf_turbo;             /* v1043T-4 cellPad.c: name-entry typing steps pending (no present, 500 Hz) */
 extern "C" void gf_cutscene_init(void);         /* v1042S gf_cutscene.c */
@@ -372,13 +422,16 @@ static DWORD WINAPI frame_clock(LPVOID)
         fb_report();
 #ifdef _WIN32
         unsigned wait_ms = 4;
+        double rem_ms = -1.0;   /* v1129P GF_CLOCK_SUBMS */
         if (qpc_clock) {
             /* v1036P: wake for the next tick, not up to 4 ms after it. */
             double rem = next_tick - pace_now_ms();
+            rem_ms = rem;
             wait_ms = rem <= 0.0 ? 0u : (rem >= 4.0 ? 4u : (unsigned)rem);
         }
         { const double fb0 = fb_t();
-        if (kick_wait) cellGcm_fifo_kick_wait(wait_ms);
+        if (kick_wait && wait_ms == 0 && rem_ms > 0.02 && gf_clock_subms_on() && gf_clock_subms_wait(rem_ms)) { /* v1129P */ }
+        else if (kick_wait) cellGcm_fifo_kick_wait(wait_ms);
         else           Sleep(wait_ms);
         fb_add(FB_WAIT, fb0); }
 #else
@@ -651,6 +704,52 @@ extern "C" {   /* v1051P cellGcmSys.c (PRESENT_SCHED shared state) */
     extern volatile double g_ps_vbl_anchor, g_ps_vbl_period, g_ps_vbl_stamp, g_ps_D, g_gf_frame_V, g_gf_sched_dt;
     extern volatile int g_ps_on;
 }
+/* v1129P GF_PACER_STATS=1 (default 0 = no line, old behaviour): the pacer's wait runs inside the lifted limiter hook, so
+ * [BUSY] counts it as "guest code" and calls the main thread busy even when most of its frame is this wait. One line per
+ * 10 s: frames, how many waited, wait per frame and as a share of wall time, the frame WORK (pacer return -> next call)
+ * mean / p50 / p85 / p95 / p99 and the mean cap period. Wait share high + work well under the period = the cap, not a
+ * thread, holds the frame rate. Diagnostics only: no timing changes. */
+static int gf_pacer_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("GF_PACER_STATS");
+        on = (e && *e == '1') ? 1 : 0;
+        if (on) fprintf(stderr, "[v1129P] pacer wait/work stats ON (GF_PACER_STATS, 10 s lines)%c", 10);
+    }
+    return on;
+}
+static int gf_pacer_stats_cmp(const void* a, const void* b)
+{
+    const float x = *(const float*)a, y = *(const float*)b;
+    return (x > y) - (x < y);
+}
+static void gf_pacer_stats_note(double work, double waited, double per)
+{
+    static float wk[4096];
+    static unsigned n = 0, nk = 0, nw = 0;
+    static double t0 = 0.0, wsum = 0.0, ksum = 0.0, psum = 0.0;
+    const double t = gf_now_sec();
+    if (t0 == 0.0) t0 = t;
+    n++; psum += per;
+    if (waited > 0.00005) { nw++; wsum += waited; }
+    if (work >= 0.0 && work < 1.0) { ksum += work; if (nk < 4096) wk[nk] = (float)work; nk++; }
+    const double span = t - t0;
+    if (span < 10.0) return;
+    const unsigned m = nk < 4096 ? nk : 4096;
+    double p50 = 0.0, p85 = 0.0, p95 = 0.0, p99 = 0.0;
+    if (m) {
+        qsort(wk, m, sizeof wk[0], gf_pacer_stats_cmp);
+        p50 = wk[(m * 50) / 100]; p85 = wk[(m * 85) / 100 < m ? (m * 85) / 100 : m - 1];
+        p95 = wk[(m * 95) / 100 < m ? (m * 95) / 100 : m - 1]; p99 = wk[(m * 99) / 100 < m ? (m * 99) / 100 : m - 1];
+    }
+    const double kmean = nk ? ksum / nk : 0.0, pmean = n ? psum / n : 0.0, wshare = wsum / span;
+    fprintf(stderr, "[v1129P] pacer 10 s: %u frames (%.1f FPS), %u waited (%.0f %%), wait %.2f ms/frame = %.0f %% of wall | work ms mean %.2f p50 %.2f p85 %.2f p95 %.2f p99 %.2f | cap period mean %.2f ms (%.0f FPS) -> %s%c",
+            n, n / span, nw, n ? 100.0 * nw / n : 0.0, n ? wsum * 1000.0 / n : 0.0, 100.0 * wshare,
+            kmean * 1000.0, p50 * 1000.0, p85 * 1000.0, p95 * 1000.0, p99 * 1000.0, pmean * 1000.0, pmean > 0.0 ? 1.0 / pmean : 0.0,
+            wshare > 0.15 ? "PACER-BOUND (the cap holds the rate)" : "pacer not limiting", 10);
+    t0 = t; n = nk = nw = 0; wsum = ksum = psum = 0.0;
+}
 extern "C" int gf_pace_frame(void)
 {
     static int on = -1;
@@ -694,6 +793,7 @@ extern "C" int gf_pace_frame(void)
 #endif
     if (!on) return 0;
     double now = gf_now_sec();
+    const double ps_t_in = now, ps_work = ret_t > 0.0 ? now - ret_t : -1.0;   /* v1129P GF_PACER_STATS */
     /* v1051P PRESENT_SCHED: frame starts mapped onto the display's vblank grid (see rsx_d3d12_backend.c). The frame
      * starts as soon as the previous one is done (no fixed cap), except that two frames never share a vblank: the
      * earliest start is previous V + n refreshes - D. Its vblank V = first grid vblank >= S + D; the game timestep is
@@ -868,6 +968,7 @@ extern "C" int gf_pace_frame(void)
         { static int rp = -1; if (rp < 0) { const char* e = getenv("GF_PACER_REPHASE"); rp = (e && *e == '0') ? 0 : 1; }
           if (rp && now - next > per * 0.15) next = now; }
     }
+    if (gf_pacer_stats_on()) gf_pacer_stats_note(ps_work, gf_now_sec() - ps_t_in, per);   /* v1129P */
     next += per;
     n_frames++;
     ret_t = gf_now_sec();
@@ -908,9 +1009,58 @@ static void gf_load_settings_ini(void)
     fclose(f);
     fprintf(stderr, "[settings] v1115A loaded %d values from settings.ini\n", n);
 }
+#ifdef _WIN32
+#include <io.h>
+#include <signal.h>
+/* v1129L GF_LOG_BUFFERED=1 (default 0 = old: stdout unbuffered, stderr the CRT default = unbuffered). Every printf /
+ * fprintf(stderr) from any thread (main guest, FIFO, SPU, audio) was one WriteFile under the stream lock, so threads
+ * queued behind each other's syscalls (v1129B_01: main sampled 99 % inside printf). =1: 64 KB full buffering on a
+ * redirected stdout and stderr (a console stays as it was), a helper thread flushes both every GF_LOG_FLUSH_MS (default
+ * 250, 10..5000), and they are flushed at exit, on abort() and on an unhandled exception, so a crash still leaves the
+ * log. The exit paths (window close, quit menus) already fflush both before TerminateProcess. Host logging only. */
+static int s_log_buffered = 0;
+static unsigned s_log_flush_ms = 250;
+static LPTOP_LEVEL_EXCEPTION_FILTER s_log_prev_uef = NULL;
+static void gf_log_flush_nolock(void) { _fflush_nolock(stdout); _fflush_nolock(stderr); }   /* dying: do not wait on a lock */
+static LONG WINAPI gf_log_uef(EXCEPTION_POINTERS* ep)
+{
+    gf_log_flush_nolock();
+    return s_log_prev_uef ? s_log_prev_uef(ep) : EXCEPTION_CONTINUE_SEARCH;
+}
+static void __cdecl gf_log_sigabrt(int) { gf_log_flush_nolock(); }
+static void __cdecl gf_log_atexit(void) { fflush(stdout); fflush(stderr); }
+static DWORD WINAPI gf_log_flusher(LPVOID)
+{
+    for (;;) { Sleep(s_log_flush_ms); fflush(stdout); fflush(stderr); }
+    return 0;
+}
+static void gf_log_buffered_setup(void)
+{
+    const char* e = getenv("GF_LOG_BUFFERED");
+    if (!(e && *e == '1')) return;
+    const char* m = getenv("GF_LOG_FLUSH_MS");
+    if (m && *m) { const int v = atoi(m); if (v >= 10 && v <= 5000) s_log_flush_ms = (unsigned)v; }
+    fflush(stdout); fflush(stderr);
+    int on = 0;
+    if (!_isatty(_fileno(stdout)) && setvbuf(stdout, NULL, _IOFBF, 64 * 1024) == 0) on |= 1;
+    if (!_isatty(_fileno(stderr)) && setvbuf(stderr, NULL, _IOFBF, 64 * 1024) == 0) on |= 2;
+    if (!on) { fprintf(stderr, "[v1129L] buffered logs requested, but stdout/stderr are consoles -> left as they were%c", 10); return; }
+    s_log_buffered = 1;
+    s_log_prev_uef = SetUnhandledExceptionFilter(gf_log_uef);
+    signal(SIGABRT, gf_log_sigabrt);
+    atexit(gf_log_atexit);
+    HANDLE h = CreateThread(NULL, 64 * 1024, gf_log_flusher, NULL, 0, NULL);
+    if (h) CloseHandle(h);
+    fprintf(stderr, "[v1129L] buffered logs ON (GF_LOG_BUFFERED; 64 KB on%s%s, flushed every %u ms + exit/abort/crash)%c",
+            (on & 1) ? " stdout" : "", (on & 2) ? " stderr" : "", s_log_flush_ms, 10);
+}
+#endif
 int main(int argc, char** argv)
 {
     gf_load_settings_ini();   /* v1115A: before any getenv */
+#ifdef _WIN32
+    gf_log_buffered_setup();  /* v1129L: GF_LOG_BUFFERED (settings.ini may set it) */
+#endif
     /* v1121H switches default off: startup owns the single enable log and placement aliases. */
     if (gf_wait_lean_enabled())
         fprintf(stderr, "[v1121H] lean blocking waits ON (GF_WAIT_LEAN; final spin <= 150 us)%c", 10);
@@ -936,7 +1086,7 @@ int main(int argc, char** argv)
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
-    setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
+    if (!s_log_buffered) setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill (v1129L: GF_LOG_BUFFERED=1 keeps the buffer) */
 #endif
 
     printf("=== ps3recomp game runner ===\n");

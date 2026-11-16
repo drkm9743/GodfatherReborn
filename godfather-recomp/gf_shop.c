@@ -72,6 +72,8 @@ static int player_pos(uint32_t pl, float* p)
     p[0] = rdf(f + 0x40); p[1] = rdf(f + 0x44); p[2] = rdf(f + 0x48);
     return fok(p[0]) && fok(p[1]) && fok(p[2]);
 }
+/* v1129RR: player position for cellPad's PAD_RECORD / PAD_REPLAY route drift report (host poll thread) */
+static int gf_rr_pos(float* p) { int r = 0; __try { const uint32_t pl = player(); if (pl) r = player_pos(pl, p); } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; } return r; }
 static int player_in_car(uint32_t pl) { const uint32_t car = rd32(pl + 0x1718u); return ok(car) && car == rd32(pl + 0x4Cu) && (rd32(pl + 0x5C4u) & 0x8u); }
 
 /* ------------------------------------------------------------------ guest calls (main PPU thread only) */
@@ -125,6 +127,7 @@ static float s_radius = 20.0f; static int s_any = 0;
 /* any thread: every cellFsOpen */
 static void fs_note(const char* g)
 {
+    { extern int (*volatile g_pad_player_pos_fn)(float* p); if (!g_pad_player_pos_fn) g_pad_player_pos_fn = gf_rr_pos; }   /* v1129RR */
     {   /* v1111T: every folder streamed under godfather_v4 (first 300 unique) -> find the tailor interiors outside world_terrain */
         const char* v = strstr(g, "godfather_v4"); if (v) { char d[160]; snprintf(d, sizeof d, "%s", v); char* sl = strrchr(d, '/'); char* bs = strrchr(d, '\\'); if (bs > sl) sl = bs; if (sl) *sl = 0;
             static uint32_t seen[300]; static int ns; uint32_t h = 2166136261u; for (const char* q = d; *q; q++) h = (h ^ (uint8_t)*q) * 16777619u;

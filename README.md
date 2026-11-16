@@ -92,6 +92,7 @@ pick your display, graphics, controls, language and mods, then press **Play**.
 | B | Store (inside a business) |
 | U | Sit down / stand up |
 | J | Smoke a cigarette |
+| G | Next GPS target (in a car; D-pad right on a controller) |
 | F10 | Trainer |
 | F11 | Fullscreen / window |
 
@@ -153,3 +154,4 @@ works with.
   port leans on and the decryption step.
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics) by Jorrit Rouwe.
 - EA Redwood Shores, for the game.
+- [ainzonix-png](https://github.com/ainzonix-png), for the trainer's rain toggle.

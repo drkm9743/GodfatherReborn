@@ -124,14 +124,18 @@ static uint32_t scratch(void)   /* refreshed each tick from the live stack point
 
 /* ------------------------------------------------------------------ page rows */
 enum { R_H_PLAYER, R_GOD, R_HEALTH, R_H_WEAP, R_INF, R_AMMO, R_WSEL, R_GIVE, R_GIVEALL, R_SCANW, R_H_MONEY, R_M1, R_M2,
-       R_MMAX, R_H_MODEL, R_STORY, R_BECOME, R_COPYM, R_RESETM, R_COUNT };
+       R_MMAX, R_H_MODEL, R_STORY, R_BECOME, R_COPYM, R_RESETM, R_H_WEATHER, R_RAIN, R_COUNT };
 
 /* ------------------------------------------------------------------ state shared with the render thread */
 static volatile int s_god = 0, s_infammo = 0;
 static volatile LONG s_req = 0;            /* bit per request (main thread takes them) */
 enum { RQ_HEALTH = 1, RQ_AMMO = 2, RQ_GIVE = 4, RQ_GIVEALL = 8, RQ_SCANW = 0x10, RQ_MONEY1 = 0x20, RQ_MONEY2 = 0x40,
        RQ_MONEYMAX = 0x80, RQ_MODEL = 0x100, RQ_COPYMODEL = 0x200, RQ_SCANM = 0x400, RQ_RESETMODEL = 0x800,
-       RQ_INFAMMO = 0x1000, RQ_BECOME = 0x2000 };
+       RQ_INFAMMO = 0x1000, RQ_BECOME = 0x2000, RQ_RAIN_ON = 0x4000, RQ_RAIN_OFF = 0x8000 };
+/* Weather: the rain scheduler singleton (*0x101DB82C, see gf_cutscene.c gf_rain_poll); rain on = its start roll
+ * func_00279138 (tick_impl), off = func_002790B0(sched, f1), which sends iMsgStartRainFadeOut. f1 = fade time. */
+extern int (*volatile g_gf_rain_poll)(void);
+#define RAIN_FADE 5.0
 static void req(LONG b) { InterlockedOr(&s_req, b); }
 static char s_msg[64] = "";                 /* last result, shown on the row that asked */
 static volatile int s_msg_row = -1;
@@ -646,6 +650,21 @@ static void tick_impl(void)
         }
     }
     if (rq & RQ_RESETMODEL) { model_reset(pl); s_msel = 0; s_pend = -1; msg(R_RESETM, "back to your own character"); }
+    if (rq & (RQ_RAIN_ON | RQ_RAIN_OFF)) {
+        const uint32_t sched = rd32(0x101DB82Cu);
+        if (!ok(sched)) msg(R_RAIN, "weather not ready");
+        else if (rq & RQ_RAIN_ON) {
+            /* func_00279138(sched) is the scheduler's own "maybe start rain" roll: rain starts when rand() x k beats
+             * (const - sched+0x88), then it picks an intensity and sends iMsgStartRainFadeIn plus the intensity message
+             * (the falling rain). A huge +0x88 for that one call makes the roll always win. */
+            const uint32_t keep = rd32(sched + 0x88);
+            wrf(sched + 0x88, 1.0e9f);
+            gcall(0x00279138u, sched, 0, 0, 0, 0);
+            wr32(sched + 0x88, keep);
+            msg(R_RAIN, "rain starting");
+        }
+        else { gcallf(0x002790B0u, sched, 0, 0, 0, 0, RAIN_FADE); msg(R_RAIN, "rain stopping"); }
+    }
 }
 static int s_trainer_on = 0;
 static void tr_tick(void);
@@ -707,6 +726,9 @@ static int t_row(int i, uiov_trainer_row* o)
     case R_BECOME: o->kind = UIOV_TR_ACTION; strcpy(o->label, "Become this character"); val(o, i, ""); return 1;
     case R_COPYM: o->kind = UIOV_TR_ACTION; strcpy(o->label, "Copy lock-on target's model"); val(o, i, s_last_tgt ? "target ready" : "lock on first"); return 1;
     case R_RESETM: o->kind = UIOV_TR_ACTION; strcpy(o->label, "Back to your character"); val(o, i, ""); return 1;
+    case R_H_WEATHER: o->kind = UIOV_TR_HEADER; strcpy(o->label, "WEATHER"); return 1;
+    case R_RAIN: { const int r = g_gf_rain_poll ? g_gf_rain_poll() : 0;
+        o->kind = UIOV_TR_CHOICE; o->on = r; strcpy(o->label, "Rain"); val(o, i, r ? "On" : "Off"); return 1; }
     }
     return 0;
 }
@@ -729,6 +751,7 @@ static void t_change(int i, int dir)
     case R_BECOME: req(RQ_BECOME); s_msel = 1; break;
     case R_COPYM: req(RQ_COPYMODEL); break;
     case R_RESETM: req(RQ_RESETMODEL); break;
+    case R_RAIN: req(g_gf_rain_poll && g_gf_rain_poll() ? RQ_RAIN_OFF : RQ_RAIN_ON); break;
     }
 }
 static int t_status(char* t, size_t n)

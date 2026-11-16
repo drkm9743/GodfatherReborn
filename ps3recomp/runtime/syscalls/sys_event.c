@@ -979,6 +979,7 @@ uint32_t sys_event_find_queue_by_key(uint64_t key)
     return 0;
 }
 
+static int s_no_portroute = -1;   /* v1129L: YDKJ_NO_PORTROUTE, read once on the first port send */
 int64_t sys_event_port_send(ppu_context* ctx)
 {
     uint32_t port_id = LV2_ARG_U32(ctx, 0);
@@ -1006,7 +1007,7 @@ int64_t sys_event_port_send(ppu_context* ctx)
          * sends; we only fix the port->queue routing our HLE lost. Env YDKJ_PORTROUTE
          * (default ON) can be disabled for A/B. */
         if (port_id <= SYS_EVENT_QUEUE_MAX && g_sys_event_queues[port_id - 1].active
-                && (!getenv("YDKJ_NO_PORTROUTE"))) {
+                && !(s_no_portroute < 0 ? (s_no_portroute = getenv("YDKJ_NO_PORTROUTE") ? 1 : 0) : s_no_portroute)) {   /* v1129L: env read once */
             sys_event_queue_info* rq = &g_sys_event_queues[port_id - 1];
             sys_event_t revt; revt.source = 0; revt.data1 = data1; revt.data2 = data2; revt.data3 = data3;
             int rc = event_queue_push(rq, &revt);

@@ -1,0 +1,331 @@
+# godfather-installer manifest
+#
+# Everything the installer knows about the game and the port is here. Paths are relative to the
+# checkout root (the folder that holds `installer/`, `godfather-recomp/` and `ps3recomp/`).
+#
+# Placeholders available in steps and build commands:
+#   {root} {port} {toolkit}   the checkout, godfather-recomp/, ps3recomp/
+#   {game} {usrdir} {elf}     the player's dump, its PS3_GAME/USRDIR, the decrypted EBOOT.elf
+#   {python}                  the installer's private venv Python (requirements installed)
+#   {work}                    scratch space: <root>/.installer/work
+#   {jobs}                    worker processes for the lifters
+#   {file}                    the current match of a step's `for_each`
+#   build only: {cmake} {ninja} {cc} {cxx} {build_jobs}
+#
+# Workflow
+#   maintainer:  godfather-installer make-patches --game <dump>   -> installer/generated.lock + installer/patches/
+#                godfather-installer export --out <dir>           -> the tree to publish
+#   player:      godfather-installer   (double-click)             -> regenerate, patch, build, "Play The Godfather.cmd"
+
+[game]
+title = "The Godfather"
+title_ids = ["BLES00043"]
+# sha256 of the decrypted PS3_GAME/USRDIR/EBOOT.elf the port was built from (European disc, v1.01).
+eboot_sha256 = ["0edb8c7b5742e111a4d73e854f53098f0e90426823f082a4cec230815418b1af"]
+# The port's tools look for the game at ../<this name>. The installer links the player's dump
+# there (a directory junction on Windows), wherever it really is.
+link_name = "Godfather, The - The Don's Edition (Europe)"
+
+[layout]
+port = "godfather-recomp"
+toolkit = "ps3recomp"
+
+[python]
+min_version = "3.10"
+requirements = ["ps3recomp/requirements.txt"]
+# Used by the asset tools in godfather-recomp/tools.
+packages = ["numpy", "Pillow"]
+
+# Files produced from the game. They are never published; the pipeline below regenerates them
+# on the player's machine and installer/patches/ turns them into the port's maintained versions.
+[generated]
+include = [
+  "godfather-recomp/recompiled/",
+  "godfather-recomp/spu/",
+  "godfather-recomp/spu-images/",
+  "godfather-recomp/assets/gf_collision.bin",
+  "godfather-recomp/assets/gf_dialogue.txt",
+  "godfather-recomp/assets/gf_wheel.bin",
+  "godfather-recomp/assets/gf_blood.bin",
+  "godfather-recomp/assets/gf_sfx_bodyhit.bin",
+  "godfather-recomp/assets/gf_kbm_glyphs.bin",
+  "godfather-recomp/texreplace/",
+]
+exclude = [
+  "**/*.pre_*",
+  "**/*.bak",
+  # hand-written: the mixer-module lifter, the low-LS function filter and its function list
+  "godfather-recomp/spu/gf_mix_plug_lift.py",
+  "godfather-recomp/spu/filter_live_functions.py",
+  "godfather-recomp/spu/live_01ee0_code_functions.json",
+  # the developer's runtime captures (the pipeline rebuilds them from EBOOT.elf into {work}/ls); see [export]
+  "godfather-recomp/spu/live_01ee0_ls.bin",
+  "godfather-recomp/spu/live_01ee0_functions.json",
+]
+# Generated files whose bytes depend on the machine. Not in the patch set and not hash-checked.
+loose = [
+  "godfather-recomp/assets/gf_collision.bin",
+  "godfather-recomp/assets/gf_dialogue.txt",
+  "godfather-recomp/assets/gf_wheel.bin",
+  "godfather-recomp/assets/gf_blood.bin",
+  "godfather-recomp/assets/gf_sfx_bodyhit.bin",
+  "godfather-recomp/assets/gf_kbm_glyphs.bin",
+  "godfather-recomp/texreplace/**",
+]
+full_patch_ok = []
+
+# ---------------------------------------------------------------------------------------------
+# The pipeline. Steps run in order from the checkout root; a finished step is not re-run for the
+# same EBOOT unless --regen is given. `optional` steps may fail (their features stay off).
+# ---------------------------------------------------------------------------------------------
+
+[[step]]
+id = "ppu-loader"
+title = "Read the PPU executable (functions, TOC, firmware imports)"
+run = ["{python}", "{toolkit}/tools/ppu_loader.py", "{elf}", "--output", "{work}/ppu"]
+
+[[step]]
+id = "ppu-functions"
+title = "Add the startup TOC thunk at 0x10200 to the function list"
+run = ["{python}", "{port}/tools/gf_installer_prep.py", "functions",
+       "{work}/ppu/EBOOT.functions.json", "{work}/ppu/EBOOT.functions.fixed.json"]
+
+[[step]]
+id = "ppu-lift"
+title = "Lift the PPU code to C++ (the long one)"
+run = ["{python}", "{toolkit}/tools/ppu_lifter.py", "{elf}",
+       "--functions", "{work}/ppu/EBOOT.functions.fixed.json",
+       "--hle-stubs", "{work}/ppu/EBOOT.imports.json",
+       "--output", "{port}/recompiled",
+       "--jobs", "{jobs}"]
+# v1053J: the jump table of func_007CF9EC that discovery misses (19 cases).
+env = { JT_EXTRA = "7CFB34:7CFB38:19" }
+outputs = ["godfather-recomp/recompiled/**"]
+
+[[step]]
+id = "spu-images"
+title = "Extract the embedded SPU programs"
+run = ["{python}", "{toolkit}/tools/extract_spu_images.py", "{elf}", "--output", "{port}/spu-images"]
+
+[[step]]
+id = "spu-lift"
+title = "Lift the SPU programs and generate their registration table"
+run = ["{python}", "{toolkit}/tools/build_spu_workloads.py",
+       "--images", "{port}/spu-images", "--lifted", "{port}/spu",
+       "--out", "{port}/spu/spu_workloads.c",
+       "--register-fn", "godfather_spu_register_all", "--constructor", "--title", "Godfather"]
+
+# godfather-recomp/lift-spu.cmd: the movie decoder kernel needs its indirect continuation entries.
+[[step]]
+id = "spu-lift-decoder"
+title = "Re-lift the movie decoder SPU program with its continuation entries"
+run = ["{python}", "{toolkit}/tools/spu_lifter.py", "{port}/spu-images/spu_0001_at_00C61000.elf",
+       "--auto-functions", "{port}/spu-images/spu_0001_at_00C61000.elf",
+       "--symbol-prefix", "spu_0001_at_00C61000_",
+       "--extra-funcs", "0x3F7CC,0x3F7D0,0x3F84C,0x3F850,0x3F858,0x3F860,0x3F870,0x3F880,0x3F8A8,0x3F8B0,0x3F8C4,0x3F8D0,0x3F8D4,0x3FE24,0x3FE28,0x3FE3C,0x3FE4C,0x3FE70,0x3FE74",
+       "-o", "{port}/spu/spu_0001_at_00C61000"]
+
+# The runtime-loaded SPU code (low-LS program, RWAC mixer modules) is stored verbatim in EBOOT.elf;
+# gf_installer_prep.py assembles the same local-store images the port's lifts were made from.
+[[step]]
+id = "spu-ls"
+title = "Assemble the SPU local-store images of the runtime-loaded code"
+run = ["{python}", "{port}/tools/gf_installer_prep.py", "spu-ls", "{elf}", "{work}/ls"]
+
+[[step]]
+id = "spu-live"
+title = "Lift the low local-store SPU program"
+run = ["{python}", "{toolkit}/tools/spu_lifter.py", "{work}/ls/live_01ee0_ls.bin",
+       "--functions", "{port}/spu/live_01ee0_code_functions.json",
+       "--symbol-prefix", "godfather_live_",
+       "--extra-funcs", "0x2658,0x1CFC,0x1060,0x1E58,0x20D8,0x1024",
+       "-o", "{port}/spu/live_01ee0"]
+
+[[step]]
+id = "spu-gfmix"
+title = "Lift the audio mixer modules"
+run = ["{python}", "{port}/spu/gf_mix_plug_lift.py",
+       "{work}/ls/ls_0D1C0.bin", "{work}/ls/ls_0F9D4.bin", "{port}/spu/gfmix"]
+
+# ---- assets from the game data (the port runs without them; each feature falls back) ----
+
+[[step]]
+id = "collision"
+title = "World collision for ragdolls, foot placement and sitting (from the level files)"
+run = ["{python}", "{port}/tools/gf_collision_build.py", "{usrdir}/godfather_v4", "{port}/assets/gf_collision.bin"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_collision.bin"]
+
+[[step]]
+id = "dialogue"
+title = "Street dialogue lines (voice streams that have a subtitle)"
+run = ["{python}", "{port}/tools/gf_dialogue_build.py", "{usrdir}", "{port}/assets/gf_dialogue.txt"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_dialogue.txt"]
+
+[[step]]
+id = "blood"
+title = "Blood decal atlas"
+run = ["{python}", "{port}/tools/gf_blood_build.py", "{usrdir}", "{port}/assets/gf_blood.bin"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_blood.bin"]
+
+[[step]]
+id = "body-hit-sound"
+title = "Bullet-into-body sound for ragdolls"
+run = ["{python}", "{port}/tools/gf_sfx_build.py", "{usrdir}", "{port}/assets/gf_sfx_bodyhit.bin"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_sfx_bodyhit.bin"]
+
+[[step]]
+id = "kbm-glyphs"
+title = "Keyboard/mouse button prompts"
+note = "Key caps are drawn with FreeSans Bold / DejaVu Sans Bold if installed, else Arial Bold; set KBM_FONT=<file.ttf> to choose another."
+run = ["{python}", "{port}/tools/gf_kbm_build.py", "{usrdir}", "{port}/assets/gf_kbm_glyphs.bin"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_kbm_glyphs.bin"]
+
+[[step]]
+id = "texreplace"
+title = "Weapon wheel icons and the main-menu logo"
+run = ["{python}", "{port}/tools/gf_texreplace_build.py", "{usrdir}", "{port}/texreplace"]
+optional = true
+outputs = ["godfather-recomp/texreplace/**"]
+
+[[step]]
+id = "wheel-atlas"
+title = "Weapon wheel icon atlas"
+run = ["{python}", "{port}/tools/gf_wheel_atlas.py", "{usrdir}"]
+optional = true
+outputs = ["godfather-recomp/assets/gf_wheel.bin"]
+
+# ---------------------------------------------------------------------------------------------
+# Build (same compiler settings as godfather-recomp/build.cmd's build-memlean2 tree, without
+# debug information, in its own build-install folder so an install never touches a developer's
+# build trees). Links GodfatherRecomp.exe and GodfatherRecomp-compat.exe (CPUs without AVX2).
+# ---------------------------------------------------------------------------------------------
+
+[build]
+configure = ["{cmake}", "-S", "{port}", "-B", "{port}/build-install", "-G", "Ninja",
+             "-DCMAKE_MAKE_PROGRAM={ninja}",
+             "-DCMAKE_C_COMPILER={cc}", "-DCMAKE_CXX_COMPILER={cxx}",
+             "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+             "-DPORT_PPU_MEMLEAN=ON",
+             "-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS",
+             "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc",
+             "-DCMAKE_C_FLAGS_RELWITHDEBINFO=/O2 /Ob1 /DNDEBUG",
+             "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/O2 /Ob1 /DNDEBUG",
+             "-DCMAKE_EXE_LINKER_FLAGS=/machine:x64",
+             "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=",
+             "-DCMAKE_STATIC_LINKER_FLAGS=/machine:x64",
+             "-DPS3RECOMP_DIR={toolkit}",
+             "-DPython3_EXECUTABLE={python}"]
+compile = ["{cmake}", "--build", "{port}/build-install", "--parallel", "{build_jobs}"]
+exe = "{port}/build-install/GodfatherRecomp.exe"
+log = "{port}/build-install.log"
+# Linux / macOS (null or Metal backend; for development).
+configure_unix = ["{cmake}", "-S", "{port}", "-B", "{port}/build-install", "-G", "Ninja",
+                  "-DCMAKE_MAKE_PROGRAM={ninja}",
+                  "-DCMAKE_C_COMPILER={cc}", "-DCMAKE_CXX_COMPILER={cxx}",
+                  "-DCMAKE_BUILD_TYPE=Release",
+                  "-DPORT_PPU_MEMLEAN=ON",
+                  "-DPS3RECOMP_DIR={toolkit}",
+                  "-DPython3_EXECUTABLE={python}"]
+compile_unix = ["{cmake}", "--build", "{port}/build-install", "--parallel", "{build_jobs}"]
+exe_unix = "{port}/build-install/GodfatherRecomp"
+
+# The launcher the installer writes next to the checkout (switches from godfather-recomp/play-fast.cmd
+# as of 2026-11-09, with player defaults for resolution / shadow quality and the diagnostics off).
+# The launcher window and the in-game menu (pause > Co-op > PC SETTINGS tab, settings.ini) override
+# display mode, resolution, vsync, shadows, filtering and the lighting options.
+[launch]
+name = "Play The Godfather"
+cwd = "{port}"
+stdout = "play.out.log"
+stderr = "play.err.log"
+env = { PS3_VERBOSE = "0", SPU_CH_BLOCK = "1", SPU_INTERP_UNLIFTED = "1", SPU_EXIT_HALT = "1", GCM_DEFAULT_CTX_REPOINT = "2", GCM_DEFAULT_CTX_FOLLOW = "1", AUDIO_AHEAD_BLOCKS = "24", PAD_SENSOR = "1", PAD_ASSIGN_CHANGES = "1", PAD_START_ON_ANY_INPUT = "0", PAD_CONNECT_WAIT = "0xB44CA0:0:0x188", PAD_KBM_PROFILE = "generic", PAD_MOUSE_SPEED = "1200", VP_NOFIXPROJ = "1", TEX_HONOR_ENABLE = "1", RSX_RESET_ZCLEAR = "1", RSX_RESET_FRONTFACE = "1", VP_ARL_ADDRSEL = "0", FRAME_STALL_MS = "900", FRAME_STALL_FLIPS = "24", PRESENT_LOG = "0", GF_CAMPROBE = "0", GF_DT_SMOOTH = "1", GF_PACER_REPHASE = "1", GF_FOOTCAM_GAMEDT = "1", GF_PACER_ADAPT = "3", GF_PACER_DYN_MINFPS = "45", GF_PACER_DYN_PCT = "95", GF_CAM_VIEWS = "1", GF_POP_REACH = "170", GF_POP_SPREAD_MIN = "60", GF_POP_SPREAD_FAR = "160", GF_POP_MUL = "1.6", GF_POP_CAP_FLOOR = "0.3", GF_POP_SPAWN_SEEN_FAR = "180", FLIP_WALKED_BOUNDARY = "1", DISPRT_FULLVIEW = "1", DISPRT_MAXFULL = "1", DISPRT_PREVFLIP = "1", TEX_CSUM_BLOCKS = "1", CLEAR_CLIP = "1", PS3_FS_SKIP_PATH = "load_en.vp6", GCM_WAITFLIP_PUMP = "1", FIFO_KICK_WAIT = "1", GCM_WAITFLIP_GPU = "1", GODFATHER_60FPS = "1", GODFATHER_TARGET_FPS = "180", FRAME_CLOCK_QPC = "1", PS3_TELEM_ASYNC = "1", PS3_TELEM_CPU = "0", SHC_PACK = "1", PSO_LIB = "1", PS3_USLEEP_CAP = "00A97A24:2000,00A9A454:2000", GCM_TITLE_RING_GUARD = "1", RSX_DEPTHONLY_RT = "1", SHADOW_HI_UNITS = "1", SHADOW_RES = "2048", GF_POST_AO = "1", GF_POST_BLOOM = "1", GF_POST_GRADE = "1", GF_POST_SHARPEN = "1", GF_POST_SSR = "2", STRIP_PARITY = "1", RSX_PRIM_RESTART = "1", RSX_PRIM_RESTART_INDEX = "0xFFFF", TEX3D_ATLAS = "1", STRIP_JOIN = "1", SHADOW_LIT_ZFUNC = "1", RSX_STATE_GUARD = "1", AUDIO_STRICT = "1", AUDIO_ACK_LEAD = "2", AUDIO_ACK_WAIT_US = "15000", AUDIO_SENTINEL = "1", AUDIO_DOWNMIX = "1", AUDIO_SOFTCLIP = "1", AUDIO_STATS = "0", CLEAR_CHANMASK = "1", RSX_WINDOW_OFFSET = "1", PS3_SC_FAST = "1", PS3_DEP_STORE_GATE = "1", PS3_MC_SAFE_CLAIMS = "0", PS3_MAIN_THREAD_SETUP = "1", PS3_MAIN_CORE = "1", PS3_BUSY = "0", PS3_TELEM = "0", RFBOUND = "0", HLESTAT = "0", PS3_SPU_HOT_TID = "2001", PS3_SPU_HOT_CORE = "1", PS3_PROF_MAIN = "0", GF_MIX_LIFT = "1", GF_PLUG_FAST = "1", RES_SCALE = "1.5", RES_SCALE_FIXES = "1", FULLSCREEN = "1", TEX_ANISO = "16", PRESENT_VSYNC = "0", BLACK_PROBE = "0", RF_ASYNC_LEGACY = "1", TEXCS = "1", TEXCS_BLOCKS = "1", PS3_NET_DISCONNECTED = "1", PS3_NET_DIALOG_CANCEL = "1", GF_NET_FASTFAIL = "1", GF_NET_AUTODISMISS = "1", GF_NO_ONLINE = "1", GCM_FASTWALK = "1", FPR_FAST = "1", FRAMESIG = "0", PAD_KBM_AIM_INVX = "1", PAD_KBM_AIM_INVY = "1", GCM_FLIP_GATE = "1", GCM_SEMA_PASSED = "0", GCM_REF_LATEST = "1", RF_QUIET = "1", RF_TRIPLE = "1", PPU_STUCKMAX = "4000000000", SPU_MISS_STATS = "0" }
+
+# ---------------------------------------------------------------------------------------------
+# export: what is copied into the tree you publish. [generated] files are always left out.
+# Review the result before pushing.
+# ---------------------------------------------------------------------------------------------
+
+[export]
+exclude = [
+  # the game itself, saves, caches and dumps of its memory / textures
+  "Godfather, The - The Don's Edition (Europe)/",
+  "gamedata/", "shadercache/", "Claude outputs/",
+  "godfather-recomp/gamedata*/", "godfather-recomp/shadercache/", "**/savedata*/", "**/dev_hdd0/",
+  "godfather-recomp/memdump/", "godfather-recomp/mmdump*/", "godfather-recomp/texdump*/",
+  "godfather-recomp/rsxcap/", "godfather-recomp/render-cap*/", "godfather-recomp/spu-frags/",
+  "godfather-recomp/wheel_all/", "godfather-recomp/analysis/",
+  "godfather-recomp/spu/**",
+  # AI-upscaled texture packs and replacement textures are made from the game's own textures
+  "godfather-recomp/texpack*/", "godfather-recomp/texreplace/", "godfather-recomp/texreplace.pre_*/",
+  "godfather-recomp/texreplace_removed/",
+  # texreplace_src: only the port's own art is published (see keep); the re-coloured game icons and the
+  # full logo picture (it contains the game's logo) are not
+  "godfather-recomp/texreplace_src/**",
+  "godfather-recomp/build-texture-pack.cmd", "godfather-recomp/tools/gf_texpack_run.ps1",
+  # maintainer-only notes, job runner, agent bridges, scratch and test folders
+  "**/*HANDOFF*", "**/*handoff*", "**/NOTES_*", "**/*AGENT*", "**/*agent*", "PS3_PORTING_PLAYBOOK.md",
+  "godfather-recomp/_*/", "godfather-recomp/claude_ipc/", "godfather-recomp/fncount/", "godfather-recomp/perf/",
+  "godfather-recomp/assign-*/", "godfather-recomp/sixaxis-*/", "godfather-recomp/verify-*/",
+  "godfather-recomp/gcm2d-diag/", "godfather-recomp/tools/m72/", "godfather-recomp/tools/ragdoll_re/",
+  "godfather-recomp/tools/*.png", "**/__pycache__/", "ps3recomp/scratch/",
+  "godfather-recomp/*.cmd", "godfather-recomp/*.ps1", "godfather-recomp/*.flag",
+  "godfather-recomp/settings.ini", "godfather-recomp/*.hlsl", "godfather-recomp/*.bin",
+  "godfather-recomp/*.f32", "godfather-recomp/*.idx", "godfather-recomp/*.txt",
+  "godfather-recomp/*_pending", "godfather-recomp/*_rejected", "godfather-recomp/*_sched",
+  # build output and run artefacts
+  "godfather-recomp/build/", "godfather-recomp/build-*/", "ps3recomp/build/", "ps3recomp/build-*/",
+  "**/*.log", "**/*.map", "**/*.bmp", "**/*.profraw", "**/*.profdata",
+  "**/*.obj", "**/*.exe", "**/*.pdb", "**/*.ilk",
+  "**/*.pre_*", "**/*.bak", "**/*.bak-*", "**/*.npz",
+  "**/stderr_*.txt", "**/gcc_err.txt", "**/gcc_out.txt", "ps3recomp/docs/*.pdf",
+  "**/*.tgz", "**/*.7z",
+  "Play The Godfather.cmd", "The Godfather.exe",
+  # the installer's own build output, logs and per-install files; the repository working copy
+  "installer/target/", "installer/*.log", "installer/launch.txt", "installer/launcher-features.txt",
+  "dist/", "github/", "_public/", ".installer/", "installer/_preview/", "installer/*.log", "installer/*.in", "installer/.keep", "publish-github.cmd", "repackage-setup.cmd",
+]
+keep = [
+  "godfather-recomp/CMakeLists.txt",
+  "ps3recomp/CMakeLists.txt",
+  "godfather-recomp/build.cmd",
+  # small text tables the game code reads next to the exe's working folder
+  "godfather-recomp/gf_trainer_models.txt", "godfather-recomp/gf_trainer_weapons.txt",
+  "godfather-recomp/gf_wheel_slots.txt", "godfather-recomp/gf_sit_clip.txt",
+  "godfather-recomp/gf_coop_templates.txt",
+  # the port's own art for tools/gf_texreplace_build.py
+  "godfather-recomp/texreplace_src/wheel_pistol.png", "godfather-recomp/texreplace_src/wheel_dynamite.png",
+  "godfather-recomp/texreplace_src/wheel_fist.png", "godfather-recomp/texreplace_src/wheel_slot.png",
+  "godfather-recomp/texreplace_src/wheel_slot_sel.png", "godfather-recomp/texreplace_src/wheel_rmark.png",
+  "godfather-recomp/texreplace_src/wheel_dpad.png", "godfather-recomp/texreplace_src/logo_reborn_strip.png",
+  # hand-written files inside the generated SPU folder
+  "godfather-recomp/spu/gf_mix_plug_lift.py",
+  "godfather-recomp/spu/filter_live_functions.py",
+  "godfather-recomp/spu/live_01ee0_code_functions.json",
+]
+# Files that must NEVER leave this folder. `export` and `package` stop with an error if the rules
+# above would let any of them through.
+forbid = [
+  "**/*HANDOFF*", "**/*handoff*", "**/NOTES_*", "PS3_PORTING_PLAYBOOK.md",
+  "**/gamedata*/**", "**/savedata*/**", "**/dev_hdd0/**",
+  "**/texpack*/**", "**/*_ls.bin", "**/EBOOT.*", "**/wheel_all/**", "**/texdump*/**",
+  "godfather-recomp/texreplace/**", "godfather-recomp/texreplace_src/logo_reborn.png",
+  "godfather-recomp/assets/gf_blood.bin", "godfather-recomp/assets/gf_sfx_bodyhit.bin",
+  "godfather-recomp/assets/gf_kbm_glyphs.bin", "godfather-recomp/assets/gf_collision.bin",
+  "godfather-recomp/assets/gf_dialogue.txt", "godfather-recomp/assets/gf_wheel.bin",
+  "Godfather, The - The Don's Edition (Europe)/**",
+  "_public/**",
+]
+
+# `godfather-installer update` and the setup's "Update now": where new versions come from. The repository
+# is the curated github/ working copy (publish-github.cmd pushes it). Only files whose content differs are downloaded.
+[update]
+repo = "whompay/GodfatherReborn"
+branch = "main"
+# Folder inside the repository that holds this tree ("" = the repository root).
+path = ""
+obsolete = []

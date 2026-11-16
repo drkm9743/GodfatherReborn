@@ -3836,6 +3836,54 @@ static __attribute__((noinline)) void spu_ib_resolve_full(spu_context* ctx)
         }
     }
 
+    /* v1129U GF_MIX_HI bit 0 (=1 or 3; default 0 = old order): the unlifted-high-LS path just below (pc >= SPU_JM2_KERNEL_BASE =
+     * 0x15000, SPU_INTERP_UNLIFTED) returns before the content-verified plugin lookup further down (ABX 0x10,
+     * spu_plug_lookup = Godfather's lifted RWAC mixer modules, spu/gfmix). Module 2 of the mixer spans capture LS
+     * 0xCD00..0x1D1D0 (305 of its 655 lifted functions sit at >= 0x15000 in the city layout, nearly all of them in the
+     * fight layout where the module loads 0x5200 higher) and modules 4..8 load at 0x28B80+, so every INDIRECT entry
+     * (bisl through a pointer, interpreter rejoin, return into a module) to those functions was interpreted
+     * instead of run lifted: v1129RR_21 [PROF] SPU 0x2001 = ~33 % of the mixer thread's samples in
+     * spu_interp_run_until_fast (+ decode/probe), the "other resolver misses" are the interpreter's decode-fill probes.
+     * More voices -> more interpreted mixer code -> the 5.33 ms block budget is exceeded -> holes.
+     * With the switch the same lookup the < 0x15000 case already uses runs first: it serves a function only when the
+     * module header AND the function's own bytes match the capture (else NULL -> the old interpreter path, unchanged),
+     * so the executed SPU code -- and the mix -- is identical, only lifted instead of interpreted. */
+    if (!fn && !ctx->policy_mode && ctx->pc >= SPU_JM2_KERNEL_BASE && (g_abx & 0x10)) {
+        static volatile long s_mh = -1;
+        long mh = s_mh;
+        if (__builtin_expect(mh < 0, 0)) {
+            const char* e = getenv("GF_MIX_HI");
+            mh = (e && *e) ? (strtol(e, 0, 0) & 1) : 0;   /* bit 0; bit 1 = extended gfmix module bodies (spu/gfmix) */
+            if (InterlockedCompareExchange(&s_mh, mh, -1) == -1 && mh)
+                fprintf(stderr, "[v1129U] GF_MIX_HI: gfmix lookup before the high-LS interpreter path (pc >= 0x%X): ON\n",
+                        SPU_JM2_KERNEL_BASE);
+        }
+        if (mh) {
+            extern spu_fn spu_plug_lookup(spu_context* ctx, uint32_t pc);
+            spu_fn hf = spu_plug_lookup(ctx, ctx->pc);
+            if (hf) {
+                /* [v1129U] every ~10 s: high-LS mixer entries now run lifted (each one was an interpreter run before). */
+                static SPU_THREAD_LOCAL unsigned t_mh_n;
+                static volatile long s_mh_n; static volatile long long s_mh_t0;
+                if ((++t_mh_n & 1023u) == 0) {
+                    InterlockedExchangeAdd(&s_mh_n, 1024);
+                    const long long now = (long long)GetTickCount64();
+                    const long long t0 = s_mh_t0;
+                    if (!t0) s_mh_t0 = now;
+                    else if (now - t0 >= 10000 && InterlockedCompareExchange64(&s_mh_t0, now, t0) == t0)
+                        fprintf(stderr, "[v1129U] GF_MIX_HI 10s: ~%ld high-LS mixer entries served lifted (were interpreted)\n",
+                                InterlockedExchange(&s_mh_n, 0));
+                }
+                spu_check_stack_reset(ctx, hf);
+#if defined(__clang__)
+                __attribute__((musttail)) return hf(ctx);
+#else
+                hf(ctx);
+                return;
+#endif
+            }
+        }
+    }
     if (!fn && !ctx->policy_mode && ctx->pc >= SPU_JM2_KERNEL_BASE) {
         static uint32_t seen[16]; static int n_seen = 0;
         int known = 0;

@@ -359,6 +359,22 @@ static void cellFsOpen(ppu_context* ctx)
      * "gameplay world loaded" for the benchmark input logic in cellPad.c (PAD_AUTOPRESS stops, BENCH_MOVE). */
     { static int done = 0; if (!done) done = pad_bench_world_mark(gpath); }
     { void (*nf)(const char*) = g_fs_open_note; if (nf) nf(gpath); }   /* v1092S */
+    /* SKIP_INTRO=1 (settings.ini): the boot logos / intro movies are timed by wall clock and cannot be skipped with
+     * a button, so they are reported absent here (same "optional file missing" result as PS3_FS_SKIP_PATH) and the
+     * game moves on to the next stage.  SKIP_INTRO_PATHS = comma list overriding the default substrings. */
+    { static int si = -1; static const char* lst = "movies/logo.vp6,movies/paramount.vp6,movies/load_";
+      if (si < 0) { const char* e = getenv("SKIP_INTRO"); si = (e && *e && *e != '0') ? 1 : 0;
+                    const char* l = getenv("SKIP_INTRO_PATHS"); if (l && *l) lst = l; }
+      if (si && strstr(gpath, "movies/")) {
+          char buf[512]; snprintf(buf, sizeof buf, "%s", lst);
+          for (char* t = strtok(buf, ","); t; t = strtok(NULL, ","))
+              if (*t && strstr(gpath, t)) {
+                  fprintf(stderr, "[fs-skip] SKIP_INTRO: '%s' reported absent\n", gpath);
+                  ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT;
+                  return;
+              }
+          fprintf(stderr, "[fs-skip] SKIP_INTRO: movie '%s' kept (not in list)\n", gpath);
+      } }
     { const char* skip = getenv("PS3_FS_SKIP_PATH");
       if (skip && *skip && strstr(gpath, skip)) {
           fprintf(stderr, "[fs-skip] optional boot media '%s' (PS3_FS_SKIP_PATH='%s')\n",

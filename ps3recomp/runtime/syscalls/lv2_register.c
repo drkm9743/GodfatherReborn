@@ -969,7 +969,8 @@ static int64_t sys_spu_thread_bind_queue_handler(ppu_context* ctx)
  * and signals completion -- satisfying the PPU's wait. Returns 1 if dispatched. */
 int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
 {
-    if (!getenv("RD_SPU_INTERP")) return 0;
+    { static int s_rd = -1; if (s_rd < 0) s_rd = getenv("RD_SPU_INTERP") ? 1 : 0;   /* v1129L: read once */
+      if (!s_rd) return 0; }
     /* Two callers reach here: an event-port send, which carries the frame's
      * work descriptor in data2, and the blocking-receive path, which has none
      * and passes 0. A worker started without a descriptor reads an empty inbox,
@@ -1974,7 +1975,8 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
     }
     if (!q && t && t->connected_queue) q = t->connected_queue;
     if (!q) { spu_group_t* g = spu_find_group(group_id); if (g) q = g->event_queue_id; }
-    { static int s_d = 0; if (getenv("SPU_MBOXTRACE") && (s_d < 64 && s_d++ < 64))
+    { static int s_d = 0, s_on = -1; if (s_on < 0) s_on = getenv("SPU_MBOXTRACE") ? 1 : 0;   /* v1129L: read once */
+      if (s_on && (s_d < 64 && s_d++ < 64))
         fprintf(stderr, "[SPU->PPU] deliver? spu=0x%X intr=%d val=0x%08X q=%u (thread %s)\n",
                 spu_id, is_intr, value, q, t ? "found" : "MISSING"); }
     if (!q) return;

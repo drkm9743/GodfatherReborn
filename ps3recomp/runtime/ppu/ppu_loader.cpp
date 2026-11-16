@@ -6020,8 +6020,10 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
     /* Line-buffer stdout: HLE logs mix printf (stdout) with probe fprintf
      * (stderr); with a redirected block-buffered stdout, printf lines sat in
      * the buffer for minutes and were LOST when the run was killed -- which
-     * made "the log line is absent" unusable as evidence. */
-    setvbuf(stdout, NULL, _IONBF, 0);
+     * made "the log line is absent" unusable as evidence.
+     * v1129L: GF_LOG_BUFFERED=1 = the host (main.cpp) set a flushed 64 KB buffer instead; keep it. */
+    { const char* lb = getenv("GF_LOG_BUFFERED");
+      if (!(lb && *lb == '1')) setvbuf(stdout, NULL, _IONBF, 0); }
 
     /* Resolve trace configuration and the opt-in store gate before any guest
      * body or guest-memory accessor can execute. */

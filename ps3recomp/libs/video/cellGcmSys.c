@@ -1254,11 +1254,48 @@ static void nv3089_blit(void)
     u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
              : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
     u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
+    /* GF_BLIT_FAST=1 (code default 0 = old per-pixel vm_read/vm_write): the rows of this scaled copy are
+     * plain byte moves (a read-swap followed by a write-swap of the same width cancels out), but every pixel
+     * paid a coherence call + a swap pair + a reservation test; the profile has this loop at ~11 % of the
+     * FIFO thread in rain / fire / explosion scenes. Per row: when no 128-byte line of the destination span
+     * is SPU-reserved and the row is outside the write-watch window, copy through host pointers (memmove for
+     * 1:1 rows, raw element copies for scaled ones) and break PPU reservations once per line. Otherwise that
+     * row takes the old path, so the guest-visible result is the same. */
+    static int s_blit_fast = -1;
+    if (s_blit_fast < 0) { const char* e = getenv("GF_BLIT_FAST"); s_blit_fast = (e && *e == '1') ? 1 : 0;
+                           if (s_blit_fast) fprintf(stderr, "[GF_BLIT_FAST] NV3089 scaled blit: host-pointer rows ON\n"); }
     for (u32 y = 0; y < out_h; y++) {
         u32 dy = out_y + y;
         if (dy < cy0 || dy >= cy1) continue;
         u64 sv = ((u64)v0 << 8) + (u64)y * s_nv3089.dt_dy;         /* 20.12 */
         u32 sy = (u32)(sv >> 20);
+        if (s_blit_fast) {
+            u32 xa = 0, xb = out_w;                                   /* clipped x range of this row */
+            if (out_x < cx0) xa = cx0 - out_x;
+            if (cx1 != 0xFFFFFFFFu) { u32 lim = (cx1 > out_x) ? cx1 - out_x : 0; if (lim < xb) xb = lim; }
+            if (xa >= xb) continue;
+            const u32 d0 = dst + dy * dst_pitch + (out_x + xa) * bpp;
+            const u32 d1 = d0 + (xb - xa) * bpp;                      /* exclusive */
+            int ok = !(d0 < g_ww_hi && d1 > g_ww_lo);
+            for (u32 l = d0 & ~127u; ok && l < d1; l += 128u) if (spu_coh_is_reserved(l)) ok = 0;
+            if (ok) {
+                uint8_t* hd = vm_ptr8(d0);
+                const u32 srow = src + sy * in_pitch;
+                if (s_nv3089.ds_dx == (1u << 20)) {
+                    const u32 sx0 = (u32)((((u64)u0 << 8) + (u64)xa * s_nv3089.ds_dx) >> 20);
+                    memmove(hd, vm_ptr8(srow + sx0 * bpp), (size_t)(xb - xa) * bpp);
+                } else {
+                    for (u32 x = xa; x < xb; x++, hd += bpp) {
+                        const u32 sx = (u32)((((u64)u0 << 8) + (u64)x * s_nv3089.ds_dx) >> 20);
+                        const uint8_t* hs = vm_ptr8(srow + sx * bpp);
+                        if (bpp == 4) memcpy(hd, hs, 4); else if (bpp == 2) memcpy(hd, hs, 2); else *hd = *hs;
+                    }
+                }
+                if (g_resv_store_active > 0)
+                    for (u32 l = d0 & ~127u; l < d1; l += 128u) ppu_resv_break_store(l < d0 ? d0 : l);
+                continue;
+            }
+        }
         for (u32 x = 0; x < out_w; x++) {
             u32 dx = out_x + x;
             if (dx < cx0 || dx >= cx1) continue;
@@ -2000,6 +2037,44 @@ void cellGcm_put_kick(void)
         if (ev) SetEvent(ev);
     }
 }
+/* v1129W GF_FIFO_KICK2 (default 0 = old): lost FIFO wake-ups. cellGcm_put_kick coalesces put stores while
+ * s_gcm_kick_pending is 1, and only this wait clears it. A put stored while the walker is busy (pending still 1
+ * from the put that woke it) therefore sets no event: the walk ends at the put it read on entry, this wait clears
+ * pending and sleeps up to its timeout (<= 4 ms) with unseen commands in the ring -- unless a dry fence poll of
+ * the main thread happens to kick. The FIFO thread then idles while it is the frame limit ([RFBOUND] fifo-walk,
+ * [BUSY-FIFO] idle 55-60 %, put -> drained 1.4 ms of which 1.0 ms walking).
+ * Bit 1: after clearing pending, skip the sleep when the guest put differs from the put the last walk read (a
+ * store after this check finds pending == 0 and sets the event, so nothing is lost either way).
+ * Bit 2 (A/B separately): also skip it when the last walk stopped at a flip word with commands still queued
+ * behind it (the flip has been presented by the caller before it waits again).
+ * Same commands, same order, same flips and presents -- the walker only starts them sooner.
+ * [v1129W] 10 s report: sleeps skipped per reason / sleeps taken. */
+static u32 s_v1129w_walk_put = 0;
+static int s_v1129w_walk_valid = 0, s_v1129w_flip_backlog = 0;
+static int s_v1129w_kick2 = -1;
+static unsigned long long s_v1129w_n[3];
+static int v1129w_kick2_mode(void)
+{
+    if (__builtin_expect(s_v1129w_kick2 < 0, 0)) {
+        const char* e = getenv("GF_FIFO_KICK2");
+        s_v1129w_kick2 = e ? (int)(strtol(e, NULL, 0) & 3) : 0;
+        if (s_v1129w_kick2)
+            fprintf(stderr, "[v1129W] FIFO kick wait: no sleep while the walker has unseen work ON (GF_FIFO_KICK2=%d:%s%s)%c",
+                    s_v1129w_kick2, (s_v1129w_kick2 & 1) ? " new put" : "", (s_v1129w_kick2 & 2) ? " + flip backlog" : "", 10);
+    }
+    return s_v1129w_kick2;
+}
+static void v1129w_kick2_report(void)
+{
+    static ULONGLONG t0 = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!t0) { t0 = now; return; }
+    if (now - t0 < 10000ull) return;
+    t0 = now;
+    fprintf(stderr, "[v1129W] 10 s: kick-wait sleeps skipped: new put %llu, flip backlog %llu | sleeps taken %llu%c",
+            s_v1129w_n[0], s_v1129w_n[1], s_v1129w_n[2], 10);
+    s_v1129w_n[0] = s_v1129w_n[1] = s_v1129w_n[2] = 0;
+}
 void cellGcm_fifo_kick_wait(unsigned ms)
 {
     static int on = -1;
@@ -2007,6 +2082,15 @@ void cellGcm_fifo_kick_wait(unsigned ms)
     HANDLE ev = on ? (HANDLE)cellGcm_fifo_kick_event() : NULL;
     if (ev) {
         InterlockedExchange(&s_gcm_kick_pending, 0);
+        const int k2 = v1129w_kick2_mode();
+        if (k2) {   /* v1129W GF_FIFO_KICK2 (the exchange above is a full barrier: a put stored before it is seen here) */
+            v1129w_kick2_report();
+            if (s_v1129w_walk_valid) {
+                if ((k2 & 1) && vm_read32(GCM_CONTROL_GUEST_ADDR + 0) != s_v1129w_walk_put) { s_v1129w_n[0]++; return; }
+                if ((k2 & 2) && s_v1129w_flip_backlog) { s_v1129w_flip_backlog = 0; s_v1129w_n[1]++; return; }
+            }
+            s_v1129w_n[2]++;
+        }
         WaitForSingleObject(ev, ms);
     }
     else    Sleep(ms);
@@ -2158,7 +2242,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       } }
     static rsx_state s_state;
     static int  s_inited = 0;
-    static int  s_gf_fifo_fast = -1;
+    static int  s_gf_fifo_fast = -1, s_gf_fifo_fast2 = -1;
     extern u32 g_rsx_last_reference;
     if (__builtin_expect(s_gf_fifo_fast < 0, 0)) {
         const char* e = getenv("GF_FIFO_FAST");
@@ -2167,6 +2251,16 @@ static void gcm_rsx_process_fifo_unlocked(void)
             fprintf(stderr, "[v1121G] FIFO packet decode fast paths ON (GF_FIFO_FAST=1)%c", 10);
     }
     const int gf_fifo_fast = s_gf_fifo_fast;
+    if (__builtin_expect(s_gf_fifo_fast2 < 0, 0)) {
+        const char* e = getenv("GF_FIFO_FAST2");
+        if (e && *e == '1') {
+            extern int rsx_v1129g_fast2_active(void);
+            s_gf_fifo_fast2 = rsx_v1129g_fast2_active();
+        } else {
+            s_gf_fifo_fast2 = 0;
+        }
+    }
+    const int gf_fifo_fast2 = s_gf_fifo_fast2;
     /* v1047A GCM_FASTWALK=1 (default off): bulk paths for whole method packets in the walker (see the two users
      * below). GCM_FASTWALK_MASK (default 0x7): 0x1 = rsx_commands.c dispatch table, 0x2 = transform-program
      * packets, 0x4 = transform-constant blocks. GCM_FASTWALK_STATS=1: a [V1047A] word/method report every 10 s. */
@@ -2202,7 +2296,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
      * `put` and the IO table, both of which the syscall layer fills; the one part
      * that does read the context (the ring-recycle heuristic) is separately guarded
      * by s_gcm_ctx_out_ea, which stays 0 on that path. */
-    if (!s_gcm_context_ea && !s_gcm_syscall_mode) return;
+    if (!s_gcm_context_ea && !s_gcm_syscall_mode) { s_v1129w_walk_valid = 0; return; }   /* v1129W: no walk = no skipped sleeps */
     if (!s_inited) { rsx_state_init(&s_state); s_inited = 1; }
     /* v1047A: which paths this walk takes (GCM_FASTWALK_PHASE=1: even PS3_AB phase = new, odd = old) and, in that
      * A/B mode, a per-phase [V1047A] report of the walk time (QPC around each walk). */
@@ -2228,6 +2322,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
      * own command ring, so everything after the jump (including the reference
      * writes its waits spin on) silently never executed. */
     u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
+    s_v1129w_walk_put = put; s_v1129w_walk_valid = 1;   /* v1129W GF_FIFO_KICK2: the put this walk has seen */
     { extern void rsx_ww_bump(void); rsx_ww_bump(); }   /* v219 VC_WW: data behind a new put may be newer than the last poll */
     /* The words behind `put` were stored by another thread (the title, or the
      * recycle below) before it stored `put`. On x86 the hardware keeps loads
@@ -2882,6 +2977,10 @@ static void gcm_rsx_process_fifo_unlocked(void)
                                     a->enabled = (a->size != 0);
                                     a->format = d;
                                 }
+                                if (gf_fifo_fast2) {
+                                    extern void rsx_v1129g_vertex_layout_changed(void);
+                                    rsx_v1129g_vertex_layout_changed();
+                                }
                                 s_state.vertex_dirty = 1;
                                 s_fifo_getoff += 4u + count * 4u;
                                 continue;
@@ -3038,6 +3137,12 @@ static void gcm_rsx_process_fifo_unlocked(void)
                                   continue;
                               }
                           }
+                           if (gf_fifo_fast2 && m == NV4097_DRAW_INDEX_ARRAY &&
+                               s_state.primitive_type == RSX_PRIMITIVE_TRIANGLES) {
+                               extern void rsx_v1129g_draw_index_triangles(rsx_state*, u32);
+                               rsx_v1129g_draw_index_triangles(&s_state, d);
+                               continue;
+                           }
                           rsx_process_method(&s_state, m, d);
                           if (m == 0x50) gcm_ref_push_at(g_rsx_last_reference, s_fifo_getoff);
                           else if (m == 0x1800) {
@@ -3393,6 +3498,10 @@ static void gcm_rsx_process_fifo_unlocked(void)
     }
 
     g_gcm_fifo_drained_ea = gcm_io2ea(s_fifo_getoff);
+    /* v1129W GF_FIFO_KICK2: the put this walk ends at (the ring recycle above may have moved it) and whether it
+     * stopped at a flip word with commands still behind it. */
+    s_v1129w_walk_put = put;
+    s_v1129w_flip_backlog = (s_fifo_getoff != put) && !strcmp(why, "flip");
     /* GCM_GET_EQ_PUT=1: publish `get` as having reached `put` rather than where
      * the walker actually is. A probe, not a fix -- it removes the back-pressure
      * a title uses to avoid overwriting commands the GPU has not read. It exists

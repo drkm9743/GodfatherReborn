@@ -2466,6 +2466,26 @@ static void gfd_build(void)
         if (two) { const float x2 = cx - w2 * 0.5f; text_draw(s + cut + 1, L - cut - 1, x2 + 1.5f, y0 + 33.5f, sz, c1); text_draw(s + cut + 1, L - cut - 1, x2, y0 + 32.0f, sz, GF_PROMPT); }
     }
 }
+/* GPS route line (Godfather gf_gps.c publishes it): "<key> Change Destination" centred above the radar (clear of the street
+ * name below it), in the street name's grey with a soft shadow, while a car has more than one target to choose from. The key
+ * is a prompt icon from ui_font.bin (gf_uifont_build.py): the D-pad on a controller, else the key cap of GF_GPS_KEY. */
+extern volatile unsigned long long g_gps_hint_t; extern volatile int g_gps_key;
+extern int (*volatile g_pad_menu_fn)(void);   /* cellPad.c: the game's pause menu / map is open */
+static int gps_want(void) { return GetTickCount64() - g_gps_hint_t < 400 && !(g_pad_menu_fn && g_pad_menu_fn() > 0); }
+static void gps_build(void)
+{
+    if (!gps_want()) return;
+    extern volatile int g_input_kbm; const int pad = g_input_kbm == 0;
+    const char* t = "Change Destination"; const int L = (int)strlen(t);
+    const float sz = 17.0f, isz = 21.0f, gap = 6.0f, cx = s_vw - 172.0f, y = 433.0f;
+    const unsigned ico = pad ? 0xF084u : 0xF300u + (unsigned)toupper(g_gps_key);
+    const UGlyph* g = glyph(ico, 1);
+    const float iw = g ? g->w * (isz / s_iline) : 0.0f, tw = text_width(t, L, sz), w = iw + (g ? gap : 0.0f) + tw;
+    float x = cx - w * 0.5f, sh[4], fg[4];
+    rgba(sh, 0, 0, 0, 0.75f); rgba(fg, 0.80f, 0.80f, 0.80f, 1.0f);
+    if (g) { icon_draw(ico, x, y, isz, 1.0f); x += iw + gap; }
+    text_draw(t, L, x + 1.5f, y + 2.0f + 1.5f, sz, sh); text_draw(t, L, x, y + 2.0f, sz, fg);
+}
 /* closed: the store prompt (top centre, like the game's "[E] OPEN DOOR") and toasts */
 static void sp_hud_build(void)
 {
@@ -2877,6 +2897,7 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
         if (!s_tr_open && !s_menu_open) want |= sp_tick(hwnd, bbw, bbh);   /* v1092S */
         if (!s_tr_open && !s_menu_open && !s_sp_page) want |= aimhud_want();   /* v1103A */
         if (!s_tr_open && !s_menu_open && !s_sp_page) want |= gfd_want();   /* v1106D */
+        if (!s_tr_open && !s_menu_open && !s_sp_page) want |= gps_want();   /* GPS route line hint */
         want |= curtain_want();   /* v1112I */
         if (want && gfx_init(dev, rtfmt)) {
             s_last_draw_ms = GetTickCount64();
@@ -2887,7 +2908,7 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
             if (s_tr_open) build_trainer();
             else if (s_menu_open) build_menu();
             else if (s_sp_page) build_shop();   /* v1092S */
-            else { if (s_hint_on) build_hint(); if (s_wm_on) build_watermark(); else tr_hud_build(); sp_hud_build(); aimhud_build(); gfd_build(); }   /* v238; v1103A aimhud; v1106D dialogue */
+            else { if (s_hint_on) build_hint(); if (s_wm_on) build_watermark(); else tr_hud_build(); sp_hud_build(); aimhud_build(); gfd_build(); gps_build(); }   /* v238; v1103A aimhud; v1106D dialogue */
             curtain_build();   /* v1112I */
             fps_build();   /* v212 */
             coop_build();

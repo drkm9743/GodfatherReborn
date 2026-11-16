@@ -397,6 +397,7 @@ add_library(gf_common OBJECT
     gf_smoke.c
     gf_shop.c
     gf_dialogue.c
+    gf_gps.c
     gf_sit.c
     gf_perf.c
     gf_hotfn.c            # v1121F native hot-function fast paths (lane F)
@@ -689,6 +690,18 @@ if(MSVC)
 else()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "-w;-ffp-contract=off")
+endif()
+
+# v1129H GF_HOST_OB2 (default OFF = the old flags). RelWithDebInfo passes /Ob1 (inline only functions marked inline)
+# to the runtime library and to the game's own C/C++ code; the runtime's own "-O2" does not undo it (the expansion of
+# /O2 sets no inline level, the explicit /Ob1 stays). The lifted TUs already get /Ob2 above. ON appends /Ob2 to
+# ps3recomp_runtime (FIFO walker, D3D12 backend, syscalls, audio) and gf_common only: the lifted PPU/SPU objects keep
+# their command lines, so turning it on rebuilds only the host code. The cache keeps the value per build dir.
+option(GF_HOST_OB2 "v1129H: /Ob2 for ps3recomp_runtime and gf_common (clang-cl)" OFF)
+if(GF_HOST_OB2 AND MSVC)
+    target_compile_options(ps3recomp_runtime PRIVATE /Ob2)
+    target_compile_options(gf_common PRIVATE /Ob2)
+    message(STATUS "Host code:       v1129H /Ob2 for ps3recomp_runtime + gf_common (GF_HOST_OB2)")
 endif()
 
 # ---------------------------------------------------------------------------

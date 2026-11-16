@@ -31,6 +31,41 @@ void (*g_rsx_vtx_sync)(void) = 0;
 
 static rsx_backend* s_backend = NULL;
 
+/* v1129G: the FIFO walker normally enters this file once per method word.  In
+ * ordinary play the tracing blocks at the top of rsx_process_method are all
+ * disabled, but their cached branches still execute for every word.  The
+ * opt-in fast path skips only those observers; the state handlers below are
+ * unchanged.  Any method observer keeps the old path so its stream is complete. */
+static int s_v1129g_fast2 = -1;
+static unsigned s_v1129g_vertex_gen = 1;
+static int s_v1129g_ms_arrays, s_v1129g_ms_indexed;
+
+static int v1129g_fast2_active(void)
+{
+    if (__builtin_expect(s_v1129g_fast2 < 0, 0)) {
+        const char* e = getenv("GF_FIFO_FAST2");
+        const int requested = e && *e == '1';
+        const int observer = getenv("RSX_MHIST") || getenv("RSX_TRACE") ||
+                             getenv("IMM_MTRACE") || getenv("PS3_MILESTONE_OUT");
+        s_v1129g_fast2 = requested && !observer;
+        if (s_v1129g_fast2)
+            fprintf(stderr, "[v1129G] FIFO per-method/draw fast paths ON (GF_FIFO_FAST2=1)%c", 10);
+        else if (requested)
+            fprintf(stderr, "[v1129G] GF_FIFO_FAST2 requested but method/milestone tracing keeps the old path%c", 10);
+    }
+    return s_v1129g_fast2;
+}
+
+int rsx_v1129g_fast2_active(void)
+{
+    return v1129g_fast2_active();
+}
+
+void rsx_v1129g_vertex_layout_changed(void)
+{
+    if (s_v1129g_fast2 > 0) s_v1129g_vertex_gen++;
+}
+
 /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
  * reference then spins on the GCM control register's `ref` field until the RSX
  * reports it as reached; cellGcmSys mirrors this into the guest control
@@ -53,6 +88,7 @@ rsx_backend* rsx_get_backend(void)
 
 void rsx_state_init(rsx_state* state)
 {
+    v1129g_fast2_active();
     memset(state, 0, sizeof(rsx_state));
     /* RSX reset value for the constant vertex attributes is (0,0,0,1); a zeroed
      * struct would leave w at 0. */
@@ -345,6 +381,7 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
          * which most were degenerate, and the draws rasterized nothing. */
         attr->enabled   = (attr->size != 0);
         attr->format    = data;
+        if (s_v1129g_fast2 > 0) s_v1129g_vertex_gen++;
         state->vertex_dirty = 1;
         return 0;
     }
@@ -384,7 +421,23 @@ static void frame_vert_account(const rsx_state* st, u32 count)
     default: break;
     }
     int hi = 0;
-    for (int i = 0; i < 16; i++) if (st->vertex_attribs[i].enabled) hi = i;
+    if (__builtin_expect(s_v1129g_fast2 > 0, 0)) {
+        static const rsx_state* cached_st;
+        static unsigned cached_gen;
+        static int cached_hi;
+        const unsigned gen = s_v1129g_vertex_gen;
+        if (cached_st != st || cached_gen != gen) {
+            for (int i = 15; i > 0; i--)
+                if (st->vertex_attribs[i].enabled) { hi = i; break; }
+            cached_st = st;
+            cached_gen = gen;
+            cached_hi = hi;
+        } else {
+            hi = cached_hi;
+        }
+    } else {
+        for (int i = 0; i < 16; i++) if (st->vertex_attribs[i].enabled) hi = i;
+    }
     g_rsx_frame_verts += count;
     g_rsx_frame_xverts += x;
     g_rsx_frame_pbytes += (unsigned long long)x * 16u * (unsigned)(hi + 1);
@@ -601,16 +654,34 @@ void rsx_draw_index_run(rsx_state* state, u32 first, u32 count)
 {
     if (s_sj_pend) sj_flush();   /* v1034C */
     frame_vert_account(state, count);
-    ps3_ms("rsx:draw_indexed");
+    if (s_v1129g_fast2 <= 0 || !s_v1129g_ms_indexed) {
+        s_v1129g_ms_indexed = 1;
+        ps3_ms("rsx:draw_indexed");
+    }
     if (s_backend && s_backend->draw_indexed) {
         rsx_stencil_log(state);
         s_backend->draw_indexed(s_backend->userdata, state->primitive_type, first, count);
     }
 }
+static int s_v1129g_draw_index_log_n;
+void rsx_v1129g_draw_index_triangles(rsx_state* state, u32 data)
+{
+    const u32 first = data & 0xFFFFFFu;
+    const u32 count = ((data >> 24) & 0xFFu) + 1u;
+    if (__builtin_expect(s_v1047_fw < 0, 0)) v1047_init();
+    if (__builtin_expect(s_v1047_stats, 0))
+        g_v1047_mhist[NV4097_DRAW_INDEX_ARRAY >> 2]++;
+    if (s_v1129g_draw_index_log_n < 8 && s_v1129g_draw_index_log_n++ < 8)
+        fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n",
+                state->primitive_type, first, count, state->index_array_offset, state->index_array_dma);
+    rsx_draw_index_run(state, first, count);
+}
 int rsx_process_method(rsx_state* state, u32 method, u32 data)
 {
     if (__builtin_expect(s_v1047_fw < 0, 0)) v1047_init();   /* v1047A GCM_FASTWALK (one-time env read) */
+    if (__builtin_expect(s_v1129g_fast2 < 0, 0)) v1129g_fast2_active();
     if (__builtin_expect(s_v1047_stats, 0) && (method & ~0x1FFCu) == 0) g_v1047_mhist[method >> 2]++;   /* v1047A GCM_FASTWALK_STATS */
+    if (__builtin_expect(s_v1129g_fast2 > 0, 0)) goto v1129g_execute;
     /* RSX_MHIST=<k>[:<len_k>]: after <k> thousand methods, count the next len_k thousand (default 4000) and
      * print a histogram (method offset, count, last data) -- what a frame is made of. */
     { static long long _mh=-2, _ml=4000000LL; static long long _mc=0; static unsigned _cnt[0x4000]; static unsigned _last[0x4000];
@@ -628,6 +699,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
      * (immediate-mode vertex data order matters: attribute 0 provokes the vertex). */
     { static int _it=-1; if(_it<0){ const char* e=getenv("IMM_MTRACE"); _it = e ? atoi(e) : 0; }
       if(_it && state->in_begin_end){ static int _m=0; if((_m < _it && _m++ < _it)) fprintf(stderr,"[immm] method=0x%04X data=0x%08X\n", method, data); } }
+v1129g_execute:
     if (__builtin_expect(s_sj_pend, 0) && method != NV4097_DRAW_INDEX_ARRAY) sj_flush();   /* v1034C STRIP_JOIN */
     /* v181 hot-method pre-dispatch (perf181 [mhist], generic FIFO methods: BEGIN_END 13.3 %, DRAW_INDEX_ARRAY 11.2 %,
      * INDEX_ARRAY_ADDRESS / _DMA 6.6 % each, TRANSFORM_PROGRAM words ~10 %). They sat 60-90 comparisons down the chain
@@ -1446,7 +1518,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
             }
         }
         frame_vert_account(state, count);
-        ps3_ms("rsx:draw_arrays");
+        if (s_v1129g_fast2 <= 0 || !s_v1129g_ms_arrays) {
+            s_v1129g_ms_arrays = 1;
+            ps3_ms("rsx:draw_arrays");
+        }
         if (s_backend && s_backend->draw_arrays)
             rsx_stencil_log(state);
             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
@@ -1490,10 +1565,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
         /* [23:0] first index, [31:24] count-1 (same packing as DRAW_ARRAYS). */
         u32 first = data & 0xFFFFFF;
         u32 count = ((data >> 24) & 0xFF) + 1;
-        { static int _d=0; if ((_d < 8 && _d++ < 8)) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
+        if (s_v1129g_draw_index_log_n < 8 && s_v1129g_draw_index_log_n++ < 8)
+            fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n",
+                    state->primitive_type, first, count, state->index_array_offset, state->index_array_dma);
         frame_vert_account(state, count);
         if (sj_take(state, first, count)) return 0;   /* v1034C STRIP_JOIN: strip/fan words of one BEGIN/END */
-        ps3_ms("rsx:draw_indexed");
+        if (s_v1129g_fast2 <= 0 || !s_v1129g_ms_indexed) {
+            s_v1129g_ms_indexed = 1;
+            ps3_ms("rsx:draw_indexed");
+        }
         if (s_backend && s_backend->draw_indexed)
             rsx_stencil_log(state);
             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,

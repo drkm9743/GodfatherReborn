@@ -153,6 +153,89 @@ static inline int rfast(int bit)
     if (__builtin_expect(m < 0, 0)) m = rfast_init();
     return m & bit;
 }
+/* v1129V GF_FIFO_FAST3 (code default 0 = old): FIFO-thread record cost, the GPU receives the same bytes.
+ *   0x1  d3d12_bind_texture skips a call whose 9 texture registers AND resolved address equal the last call for that
+ *        unit, when the format is not B8 (B8 re-dirties the legacy atlas) and s_d3d.tex_bound == 0 (a non-B8 call
+ *        sets it to 0 or leaves it): the body writes only cur_texs[unit] (pure function of those inputs; nothing
+ *        else writes cur_texs) plus the tex_* globals for B8 -> the skipped call would store identical values.
+ *        Off with the debug observers TEX_PROBE (reads texture memory) / CUBEDBG / MOVIE_BIND / TEXFMTDBG.
+ *   0x2  VCB_DEDUP is no longer disabled by VP_NOFIXPROJ (Godfather play.cmd sets it): with VP_NOFIXPROJ set and
+ *        VP_FIXPROJ unset the garbage-projection fallback at the end of vp_record_cb can never run, so a slot is
+ *        exactly constants + epilogue = what the v219g dedup key covers (the same key every other title uses).
+ * GF_FIFO_FAST3=1 = both bits; GF_FIFO_FAST3_MASK=<hex> selects bits. 10 s report "[v1129V] bind_texture ...". */
+static int s_v1129v_f3 = -1;
+static int v1129v_f3(int bit)
+{
+    int m = s_v1129v_f3;
+    if (__builtin_expect(m < 0, 0)) {
+        const char* e = getenv("GF_FIFO_FAST3");
+        m = (e && *e == '1') ? 0x3 : 0;
+        if (m) { const char* k = getenv("GF_FIFO_FAST3_MASK"); if (k && *k) m = (int)(strtoul(k, NULL, 16) & 0x3u); }
+        if ((m & 1) && (getenv("TEX_PROBE") || getenv("CUBEDBG") || getenv("MOVIE_BIND") || getenv("TEXFMTDBG"))) m &= ~1;
+        fprintf(stderr, "[v1129V] FIFO record fast paths (GF_FIFO_FAST3): %s mask 0x%X (1 identical bind_texture skip, 2 VCB_DEDUP with VP_NOFIXPROJ)%c",
+                m ? "ON" : "off", (unsigned)m, 10);
+        s_v1129v_f3 = m;
+    }
+    return m & bit;
+}
+/* v1129X GPU-side switches (all code default 0 = old behaviour; one "[v1129X] ... ON" line each when enabled):
+ *   GF_GPU_TIMING=1    D3D12 timestamps per render-target pass + the two post-FX calls, read back from a 3-frame ring
+ *                      (frame N reads N-2, never waits); every 10 s "[v1129X gpu]" lines: GPU busy ms per frame (first
+ *                      to last timestamp of the frame's command list), GPU idle between frames, the render side's
+ *                      wait_for_gpu ms per frame, and the most expensive passes. Diagnostic only, nothing drawn changes.
+ *   GF_RF_EARLY_B8=1   with RF_EARLY=1 (+ RF_TRIPLE=1): frames whose last bound texture is B8 (tex_bound) may also use
+ *                      the early order (prepass before the GPU wait) when the legacy atlas block cannot upload in this
+ *                      exec: its first condition needs tex_ready == 1 and tex_ready is only ever set inside that block,
+ *                      so tex_ready == 0 at the decision means no upload this exec. Same work, reordered on the CPU.
+ *   GF_SCREENCOPY_LAZY=1  the backbuffer -> s_screen_copy copies (end of every frame + after reduced-viewport passes)
+ *                      are skipped until the first frame whose prepass binds s_screen_copy to a draw (then one
+ *                      "[v1129X] screen copy wanted" line and the copies resume for good). A session that never prints
+ *                      that line drew exactly the same pixels (nothing ever sampled the copy). */
+static int v1129x_env(const char* n, const char* what)
+{
+    const char* e = getenv(n); const int on = (e && *e == '1') ? 1 : 0;
+    if (on) fprintf(stderr, "[v1129X] %s (%s) ON%c", what, n, 10);
+    return on;
+}
+static int s_v1129x_early_b8 = -1, s_v1129x_sclazy = -1, s_v1129x_sc_wanted = 0;
+static inline int v1129x_early_b8(void)
+{
+    if (__builtin_expect(s_v1129x_early_b8 < 0, 0)) s_v1129x_early_b8 = v1129x_env("GF_RF_EARLY_B8", "RF_EARLY order also for B8-bound frames whose atlas cannot upload");
+    return s_v1129x_early_b8;
+}
+static inline int v1129x_sclazy(void)
+{
+    if (__builtin_expect(s_v1129x_sclazy < 0, 0)) s_v1129x_sclazy = v1129x_env("GF_SCREENCOPY_LAZY", "screen copy only once a draw samples it");
+    return s_v1129x_sclazy;
+}
+/* v1129D GF_RENDER_FAST2 (code default 0 = old): more replay-side CPU cuts, the GPU receives the same work.
+ *   0x1  srv_write_ex: the SRV heap's CPU start handle is read once per heap (it is constant for the heap's lifetime;
+ *        s_d3d.srv_heap is created once) instead of one GetCPUDescriptorHandleForHeapStart call per descriptor write.
+ *   0x2  prepass: a draw whose pipeline arguments equal the previous draw's (same FP snapshot pointer, same FP meta,
+ *        same VS blob/hash, same vp_gen, no pipeline miss since) re-uses its pipeline instead of the cache lookup.
+ *   0x4  prepass: a third window cache for PLAIN draws whose generation is not ended by shadow-only draws (v57 ends
+ *        the plain run at every non-plain draw, so in the city every shadow receiver resets it). Consulted only after
+ *        the v57 cache and the v1121D shadow cache missed, i.e. where the draw would resolve its 16 units itself; a
+ *        hit copies exactly what that resolution produces (window, gfw + gfw_note, gfa) and notes the draw into the
+ *        v57 cache as its own resolution would, so the v57 cache's behaviour is unchanged.
+ * GF_RENDER_FAST2=1 = every bit; GF_RENDER_FAST2_MASK=<hex> selects bits (needs GF_RENDER_FAST2=1). */
+static int s_rfast2 = -1;
+static int rfast2_init(void)
+{
+    const char* e = getenv("GF_RENDER_FAST2");
+    int m = (e && *e == '1') ? 0x7 : 0;
+    if (m) { const char* k = getenv("GF_RENDER_FAST2_MASK"); if (k && *k) m = (int)(strtoul(k, NULL, 16) & 0x7u); }
+    fprintf(stderr, "[v1129D] render CPU fast paths 2 (GF_RENDER_FAST2): %s mask 0x%X (1 SRV heap start cached, 2 consecutive-draw pipeline memo, 4 plain windows across shadow-only draws)%c",
+            m ? "ON" : "off", (unsigned)m, 10);
+    s_rfast2 = m;
+    return m;
+}
+static inline int rfast2(int bit)
+{
+    int m = s_rfast2;
+    if (__builtin_expect(m < 0, 0)) m = rfast2_init();
+    return m & bit;
+}
 static ID3D12Resource* s_vpc_res[3][VP_MAX_CHUNKS];   /* v207: x3 for RF_TRIPLE */
 static unsigned char*  s_vpc_map[3][VP_MAX_CHUNKS];
 static u32             s_vpc_cur;      /* chunk being filled, current parity */
@@ -440,6 +523,38 @@ static u64 v1121d_sh_hash(u64 h46, u32 zeta_off)
 {
     u64 h = (h46 ^ ((u64)zeta_off * 0x9E3779B97F4A7C15ull)) * 1099511628211ull;
     return h ? h : 1;
+}
+/* v1129D GF_RENDER_FAST2 0x4: plain-draw window cache whose generation advances only at the frame start and at draws
+ * with a render-target or depth-colour source (the draws that can change what a later plain resolution sees: they
+ * create conversion targets / take the feedback path). Shadow-only draws read s_zs (created only in the replay) and
+ * the texture slots (a used slot is never evicted within a frame), so they cannot change a plain resolution. Same
+ * 4-way rule and key (v46 hash, full srv_alias_same verify) as v57; plus v1129d_pc_zeta_ok below. */
+static SRVAliasEntry s_v1129d_pc[SRV_ALIAS_CACHE][SRV_ALIAS_WAYS];
+static u32 s_v1129d_pcgen = 1;
+static u64 s_v1129d_pc_hits, s_v1129d_pso_memo;
+static void v1129d_pc_barrier(void)
+{
+    if (++s_v1129d_pcgen == 0) { memset(s_v1129d_pc, 0, sizeof s_v1129d_pc); s_v1129d_pcgen = 1; }
+}
+static void v1129d_pc_note(u32 bucket, SRVAliasEntry ent)   /* srv_alias_note's 4-way rule on this cache */
+{
+    SRVAliasEntry* const w = s_v1129d_pc[bucket];
+    int at = SRV_ALIAS_WAYS - 1;
+    for (int i = 0; i < (int)SRV_ALIAS_WAYS; i++)
+        if (w[i].generation == ent.generation && w[i].hash == ent.hash) { at = i; break; }
+    for (int i = at; i > 0; i--) w[i] = w[i - 1];
+    w[0] = ent;
+}
+/* A plain resolution also depends on the draw's own zeta offset, but only through depth-format units (0x90-0x93):
+ * a shadow map on the zeta the draw renders into falls back to "lit". The v46 key does not hold zeta_off, so this
+ * cache only re-uses across different zeta offsets when no fragment-program unit is depth-format. */
+static int v1129d_pc_zeta_ok(const D3D12DrawRecord* sp, const D3D12DrawRecord* dr)
+{
+    if (sp->zeta_off == dr->zeta_off) return 1;
+    const u32 m = dr->fp_meta_valid ? dr->fp_tex_mask : 0xFFFFu;
+    for (u32 u = 0; u < RSX_D3D_TEX_UNITS; u++)
+        if ((m & (1u << u)) && dr->tex[u].set && (dr->tex[u].fmt & 0x9Fu) >= 0x90u && (dr->tex[u].fmt & 0x9Fu) <= 0x93u) return 0;
+    return 1;
 }
 
 /* Offscreen render target (render-to-texture). Persistent across frames --
@@ -1658,13 +1773,9 @@ static LRESULT CALLBACK ri_wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         RAWINPUT ri; UINT sz = sizeof(ri);
         if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
             ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
-            InterlockedExchangeAdd(&g_pad_raw_mdx, (LONG)ri.data.mouse.lLastX);
-            InterlockedExchangeAdd(&g_pad_raw_mdy, (LONG)ri.data.mouse.lLastY);
-            InterlockedExchangeAdd(&g_pad_raw_look_dx, (LONG)ri.data.mouse.lLastX);
-            InterlockedExchangeAdd(&g_pad_raw_look_dy, (LONG)ri.data.mouse.lLastY);
-            if (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL)
-                InterlockedExchangeAdd(&g_pad_raw_wheel, (LONG)(SHORT)ri.data.mouse.usButtonData);
-            g_pad_raw_ok = 1;
+            { extern void pad_rr_mouse_in(long dx, long dy, long wheel);   /* v1129RR: record / replay aware (same adds as before) */
+              pad_rr_mouse_in((long)ri.data.mouse.lLastX, (long)ri.data.mouse.lLastY,
+                              (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) ? (long)(SHORT)ri.data.mouse.usButtonData : 0L); }
         }
     }
     return DefWindowProcA(h, m, wp, lp);
@@ -2116,14 +2227,9 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         RAWINPUT ri; UINT sz = sizeof(ri);
         if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
             ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
-            InterlockedExchangeAdd(&g_pad_raw_mdx, (LONG)ri.data.mouse.lLastX);
-            InterlockedExchangeAdd(&g_pad_raw_mdy, (LONG)ri.data.mouse.lLastY);
-            { extern volatile long g_pad_raw_look_dx, g_pad_raw_look_dy;   /* v1052M */
-              InterlockedExchangeAdd(&g_pad_raw_look_dx, (LONG)ri.data.mouse.lLastX);
-              InterlockedExchangeAdd(&g_pad_raw_look_dy, (LONG)ri.data.mouse.lLastY); }
-            if (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL)
-                InterlockedExchangeAdd(&g_pad_raw_wheel, (LONG)(SHORT)ri.data.mouse.usButtonData);
-            g_pad_raw_ok = 1;
+            { extern void pad_rr_mouse_in(long dx, long dy, long wheel);   /* v1129RR: record / replay aware (same adds as before) */
+              pad_rr_mouse_in((long)ri.data.mouse.lLastX, (long)ri.data.mouse.lLastY,
+                              (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) ? (long)(SHORT)ri.data.mouse.usButtonData : 0L); }
         }
         break;             /* DefWindowProc does the raw-input cleanup */
     }
@@ -3032,7 +3138,17 @@ static int init_d3d12(u32 width, u32 height)
  * Frame sync helpers
  * -----------------------------------------------------------------------*/
 
+static int s_gq_x = 0;   /* v1129X GF_GPU_TIMING active (set in gq_active) */
+static double s_gx_wait_ms = 0.0, s_gx_qpf_ms = 0.0;
+static void wait_for_gpu_body(void);
 static void wait_for_gpu(void)
+{
+    if (__builtin_expect(s_gq_x <= 0, 1)) { wait_for_gpu_body(); return; }
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    wait_for_gpu_body();
+    QueryPerformanceCounter(&b); s_gx_wait_ms += (double)(b.QuadPart - a.QuadPart) * s_gx_qpf_ms;
+}
+static void wait_for_gpu_body(void)
 {
     u32 fi = s_d3d.frame_index;
     s_d3d.fence_values[fi]++;
@@ -10036,7 +10152,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
         if (s_vcb_cmp < 0) { const char* c = getenv("VCB_CMP"); s_vcb_cmp = (c && *c == '1') ? 1 : 0; }
         if (dd < 0) { const char* e = getenv("VCB_DEDUP"); dd = (e && *e == '0') ? 0 : 1;
             if (getenv("VP_MVP") || getenv("RSX_DBG_CB") || getenv("DBG_ZOOM") || getenv("VPC_DUMP_FP") || getenv("VPC_DUMP_VS") ||
-                getenv("VP_FIXPROJ") || getenv("VP_NOFIXPROJ")) dd = 0;
+                getenv("VP_FIXPROJ") || (getenv("VP_NOFIXPROJ") && !v1129v_f3(2))) dd = 0;   /* v1129V 0x2: NOFIXPROJ = fallback never runs */
             fprintf(stderr, "[VCB_DEDUP] v219g identical VP constant slots re-used: %s (ABX 0x8000000 = off)%c", dd ? "ON" : "off", 10); }
         rsx_state* stw = (rsx_state*)st;
         const int cchg = stw->vertex_constants_dirty; stw->vertex_constants_dirty = 0;
@@ -10657,6 +10773,18 @@ static int srvc_write(D3D12_CPU_DESCRIPTOR_HANDLE dst, ID3D12Resource* res, DXGI
     s_d3d.device->lpVtbl->CopyDescriptorsSimple(s_d3d.device, 1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     return 1;
 }
+/* v1129D GF_RENDER_FAST2 0x1: the SRV heap's CPU start (constant for the heap's lifetime). srv_write_ex runs on the
+ * replay thread only. */
+static inline void v1129d_srv_cpu_start(D3D12_CPU_DESCRIPTOR_HANDLE* h)
+{
+    static ID3D12DescriptorHeap* s_hh = NULL; static D3D12_CPU_DESCRIPTOR_HANDLE s_hc;
+    if (rfast2(1)) {
+        if (s_hh != s_d3d.srv_heap) { RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &s_hc); s_hh = s_d3d.srv_heap; }
+        *h = s_hc;
+        return;
+    }
+    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, h);
+}
 static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
                          UINT mapping, int cube)
 {
@@ -10678,7 +10806,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
     if (ps3_telem_enabled()) s_sf_srv_writes++;
     if (_v1121d_win && rfast(2)) {   /* v1121D GF_RENDER_FAST 0x2 */
         D3D12_CPU_DESCRIPTOR_HANDLE hw;
-        RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &hw);
+        v1129d_srv_cpu_start(&hw);   /* v1129D FAST2 0x1 (old: one GetCPUDescriptorHandleForHeapStart per write) */
         hw.ptr += (u64)heap_slot * s_d3d.srv_inc;
         if (srvc_write(hw, res, fmt, mapping, cube)) return;
     }
@@ -10694,7 +10822,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
         sv.TextureCube.ResourceMinLODClamp = 0.0f;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &h);
+    v1129d_srv_cpu_start(&h);   /* v1129D FAST2 0x1 */
     h.ptr += (u64)heap_slot * s_d3d.srv_inc;
     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, res, &sv, h);
 }
@@ -11342,6 +11470,7 @@ static void screen_copy_capture(u32 fi)
                         &IID_ID3D12Resource, (void**)&s_screen_copy)))
                     s_screen_copy = NULL;
             }
+            if (s_screen_copy && !s_v1129x_sc_wanted && v1129x_sclazy()) return;   /* v1129X: nothing has sampled it yet */
             if (s_screen_copy) {
                 D3D12_RESOURCE_BARRIER bb[2] = {0};
                 bb[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -12468,8 +12597,10 @@ static int v1121d_atlas_uploads(void)
  * =========================================================================*/
 #define GQ_N 1024
 enum { GQ_PRE = 1, GQ_VPBEGIN = 2, GQ_POST = 3, GQ_END = 4 };
+enum { GQ_PFX_AO = 5, GQ_PFX_GRADE = 6 };   /* v1129X: the two post-FX calls (GF_GPU_TIMING only) */
 static ID3D12QueryHeap* s_gq_heap = NULL; static ID3D12Resource* s_gq_rb = NULL;
-static int s_gq_on = -1, s_gq_par = 0; static u32 s_gq_n[2]; static u64 s_gq_lab[2][GQ_N];
+static int s_gq_on = -1, s_gq_par = 0; static u32 s_gq_n[3]; static u64 s_gq_lab[3][GQ_N];
+static int s_gq_ring = 2;   /* v199 GPUPROF: 2 halves; v1129X GF_GPU_TIMING: 3 slots */
 static double s_gq_tick_ms = 0.0;
 typedef struct { u64 lab; double ms; u32 cnt; } GqAgg;
 #define GQ_AGG 256
@@ -12478,21 +12609,29 @@ static int gq_active(void)
 {
     if (__builtin_expect(s_gq_on >= 0, 1)) return s_gq_on;
     s_gq_on = 0;
-    { const char* e = getenv("GPUPROF"); if (!e || *e != '1') return 0; }
+    { const char* e = getenv("GPUPROF"); const char* x = getenv("GF_GPU_TIMING");
+      if (x && *x == '1') { s_gq_ring = 3; }
+      else if (!e || *e != '1') return 0; }
     if (!s_d3d.device || !s_d3d.cmd_queue) return 0;
     UINT64 fq = 0;
     if (FAILED(s_d3d.cmd_queue->lpVtbl->GetTimestampFrequency(s_d3d.cmd_queue, &fq)) || !fq) return 0;
     s_gq_tick_ms = 1000.0 / (double)fq;
-    D3D12_QUERY_HEAP_DESC qd; memset(&qd, 0, sizeof qd); qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = 2 * GQ_N;
+    D3D12_QUERY_HEAP_DESC qd; memset(&qd, 0, sizeof qd); qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = (UINT)s_gq_ring * GQ_N;
     if (FAILED(s_d3d.device->lpVtbl->CreateQueryHeap(s_d3d.device, &qd, &IID_ID3D12QueryHeap, (void**)&s_gq_heap)) || !s_gq_heap) return 0;
     D3D12_HEAP_PROPERTIES hp; memset(&hp, 0, sizeof hp); hp.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC bd; memset(&bd, 0, sizeof bd);
-    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = 2 * GQ_N * 8; bd.Height = 1; bd.DepthOrArraySize = 1;
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = (UINT64)s_gq_ring * GQ_N * 8; bd.Height = 1; bd.DepthOrArraySize = 1;
     bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&s_gq_rb)) || !s_gq_rb) return 0;
-    s_gq_n[0] = s_gq_n[1] = 0;
+    s_gq_n[0] = s_gq_n[1] = s_gq_n[2] = 0;
     s_gq_on = 1;
+    if (s_gq_ring == 3) {
+        LARGE_INTEGER qf; QueryPerformanceFrequency(&qf); s_gx_qpf_ms = 1000.0 / (double)qf.QuadPart;
+        s_gq_x = 1;
+        fprintf(stderr, "[v1129X] GPU pass timing, 3-frame readback ring, report every 10 s (GF_GPU_TIMING) ON (%.1f MHz)%c", (double)fq / 1e6, 10);
+        return 1;
+    }
     fprintf(stderr, "[GPUPROF] v199 GPU pass timestamps ON (GPUPROF=1), %.1f MHz%c", (double)fq / 1e6, 10);
     return 1;
 }
@@ -12509,13 +12648,17 @@ static void gq_label_str(u64 lab, char* o, size_t on)
     if (lab == GQ_PRE) { snprintf(o, on, "before VP pass (copies, conversions)"); return; }
     if (lab == GQ_VPBEGIN) { snprintf(o, on, "VP pass start"); return; }
     if (lab == GQ_POST) { snprintf(o, on, "after VP pass (composite, present copy)"); return; }
+    if (lab == GQ_PFX_AO) { snprintf(o, on, "post-FX call 1: scene copy + AO (half res) + AO apply (full res)"); return; }
+    if (lab == GQ_PFX_GRADE) { snprintf(o, on, "post-FX call 2: scene copy + bloom + sharpen/grade (full res)"); return; }
     const u32 w = (u32)(lab >> 44) & 0xFFFFF, h = (u32)(lab >> 24) & 0xFFFFF, nrt = (u32)(lab >> 8) & 0xF;
     snprintf(o, on, "%s %ux%u x%u%s", (lab & 0x10) ? "back" : "rt", w, h, nrt, (lab & 1) ? " +z" : "");
 }
 /* frame start (cmd list just reset, previous frame finished on the GPU): fold the previous frame in */
+static void gx_frame_begin(void);   /* v1129X */
 static void gq_frame_begin(void)
 {
     if (!gq_active()) return;
+    if (s_gq_x) { gx_frame_begin(); return; }
     const int q = s_gq_par ^ 1;   /* the previous frame's half */
     const u32 n = s_gq_n[q];
     if (n >= 2) {
@@ -12554,6 +12697,7 @@ static void gq_frame_begin(void)
     gq_mark(GQ_PRE);
 }
 /* before Close: end mark + resolve this frame's timestamps into its readback half */
+static u8 s_gx_done[3];   /* v1129X: slot resolved by its frame's command list */
 static void gq_frame_end(void)
 {
     if (s_gq_on <= 0) return;
@@ -12561,6 +12705,73 @@ static void gq_frame_end(void)
     const int p = s_gq_par;
     if (s_gq_n[p]) s_d3d.cmd_list->lpVtbl->ResolveQueryData(s_d3d.cmd_list, s_gq_heap, D3D12_QUERY_TYPE_TIMESTAMP,
                                                            (UINT)(p * GQ_N), s_gq_n[p], s_gq_rb, (UINT64)p * GQ_N * 8);
+    if (s_gq_x && s_gq_n[p] >= 2) s_gx_done[p] = 1;
+}
+/* v1129X GF_GPU_TIMING: 3 slots; frame N records into slot N % 3 and, at its start, reads slot (N-2) % 3. Frame N-2
+ * has finished on the GPU by then in both orders: the normal order waits for N-1 before this point, and in the RF_EARLY
+ * order exec N-1 waited for N-2 before recording. So the Map never waits and never sees a half-written slot. */
+#define GX_HIST 4096
+static u64 s_gx_prev_end; static int s_gx_prev_ok;
+static double s_gx_busy, s_gx_idle, s_gx_bmax; static u32 s_gx_nb, s_gx_ni, s_gx_execs;
+static float s_gx_hist[GX_HIST]; static u32 s_gx_hn;
+static ULONGLONG s_gx_t0;
+static int gx_cmpf(const void* a, const void* b) { const float x = *(const float*)a, y = *(const float*)b; return (x > y) - (x < y); }
+static void gx_frame_begin(void)
+{
+    const int cur = s_gq_par;            /* slot of frame N-1 */
+    const int q = (cur + 2) % 3;         /* slot of frame N-2 */
+    const u32 n = s_gq_n[q];
+    s_gx_execs++;
+    if (s_gx_done[q] && n >= 2) {
+        D3D12_RANGE rr = { (SIZE_T)q * GQ_N * 8, (SIZE_T)(q * GQ_N + n) * 8 };
+        void* m = NULL;
+        if (SUCCEEDED(s_gq_rb->lpVtbl->Map(s_gq_rb, 0, &rr, &m)) && m) {
+            const u64* t = (const u64*)m + (size_t)q * GQ_N;
+            for (u32 i = 0; i + 1 < n; i++) {
+                if (t[i + 1] < t[i]) continue;
+                const double ms = (double)(t[i + 1] - t[i]) * s_gq_tick_ms;
+                const u64 lab = s_gq_lab[q][i];
+                u32 h = (u32)((lab * 0x9E3779B97F4A7C15ull) >> 56) % GQ_AGG;
+                for (u32 k = 0; k < GQ_AGG; k++, h = (h + 1) % GQ_AGG) {
+                    if (s_gq_agg[h].cnt == 0 || s_gq_agg[h].lab == lab) { s_gq_agg[h].lab = lab; s_gq_agg[h].ms += ms; s_gq_agg[h].cnt++; break; }
+                }
+            }
+            if (t[n - 1] >= t[0]) {
+                const double b = (double)(t[n - 1] - t[0]) * s_gq_tick_ms;
+                s_gx_busy += b; s_gx_nb++; if (b > s_gx_bmax) s_gx_bmax = b;
+                if (s_gx_hn < GX_HIST) s_gx_hist[s_gx_hn++] = (float)b;
+                if (s_gx_prev_ok && t[0] >= s_gx_prev_end) { s_gx_idle += (double)(t[0] - s_gx_prev_end) * s_gq_tick_ms; s_gx_ni++; }
+                s_gx_prev_end = t[n - 1]; s_gx_prev_ok = 1;
+            } else s_gx_prev_ok = 0;
+            s_gq_frames++;
+            D3D12_RANGE wr = {0, 0}; s_gq_rb->lpVtbl->Unmap(s_gq_rb, 0, &wr);
+        } else s_gx_prev_ok = 0;
+    } else s_gx_prev_ok = 0;
+    s_gx_done[q] = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!s_gx_t0) s_gx_t0 = now;
+    if (now - s_gx_t0 >= 10000 && s_gx_nb) {
+        const double wall = (double)(now - s_gx_t0);
+        qsort(s_gx_hist, s_gx_hn, sizeof(float), gx_cmpf);
+        const double p50 = s_gx_hn ? s_gx_hist[s_gx_hn / 2] : 0.0, p90 = s_gx_hn ? s_gx_hist[(s_gx_hn * 9) / 10] : 0.0;
+        fprintf(stderr, "[v1129X gpu] %.1f s, %u execs (%.1f/s), %u timed: GPU busy %.2f ms/frame (p50 %.2f p90 %.2f max %.2f) = %.0f %% of wall | GPU idle between frames %.2f ms/frame | render-side wait_for_gpu %.2f ms/exec%c",
+                wall / 1000.0, s_gx_execs, s_gx_execs * 1000.0 / wall, s_gx_nb, s_gx_busy / s_gx_nb, p50, p90, s_gx_bmax,
+                100.0 * s_gx_busy * ((double)s_gx_execs / (double)s_gx_nb) / wall,
+                s_gx_ni ? s_gx_idle / s_gx_ni : 0.0, s_gx_execs ? s_gx_wait_ms / s_gx_execs : 0.0, 10);
+        for (int r = 0; r < 16; r++) {
+            int b = -1;
+            for (int k = 0; k < GQ_AGG; k++) if (s_gq_agg[k].cnt && (b < 0 || s_gq_agg[k].ms > s_gq_agg[b].ms)) b = k;
+            if (b < 0) break;
+            char nm[112]; gq_label_str(s_gq_agg[b].lab, nm, sizeof nm);
+            fprintf(stderr, "[v1129X gpu]   pass %6.3f ms/frame  %5.1f/frame  %s%c", s_gq_agg[b].ms / s_gq_frames,
+                    (double)s_gq_agg[b].cnt / s_gq_frames, nm, 10);
+            s_gq_agg[b].cnt = 0; s_gq_agg[b].ms = 0;
+        }
+        memset(s_gq_agg, 0, sizeof s_gq_agg); s_gq_total_ms = 0; s_gq_frames = 0;
+        s_gx_busy = s_gx_idle = s_gx_bmax = 0; s_gx_nb = s_gx_ni = s_gx_execs = 0; s_gx_hn = 0; s_gx_wait_ms = 0; s_gx_t0 = now;
+    }
+    s_gq_par = (cur + 1) % 3; s_gq_n[s_gq_par] = 0; s_gx_done[s_gq_par] = 0;
+    gq_mark(GQ_PRE);
 }
 /* v1053P PRESENT_LOG_ASYNC (default 1; 0 = old): with PRESENT_LOG=1 the render thread did fflush(presentlog.txt) once a
  * second (GetTickCount-aligned). The user's 22-min 4K session (presentlog 18:08) has 818 presents > 25 ms in steady play and
@@ -12716,6 +12927,11 @@ static void render_frame_exec(void)
      * needs the previous frame finished (graveyard release, pool pages, probe readback, the FIFO's parity event) stays
      * after the wait. Frames with legacy (non-VP) draws or the font atlas run the old order. ABX 0x80000 = old order. */
     s_rf_early_frame = rf_early_on() && !RF_TEX_BOUND && !s_rf_legacy_draws && !(g_abx & s_rf_early_bit);   /* v1121D: snapshot under GF_RENDER_FAST */
+    /* v1129X GF_RF_EARLY_B8: the atlas block below can only upload when RF_TEX_READY == 1 (its first condition), and
+     * tex_ready is only set inside that block -> with RF_TEX_READY == 0 now, nothing in this exec reads the atlas state
+     * the early order was protecting. Legacy draws still force the old order. */
+    if (!s_rf_early_frame && rf_early_on() && RF_TEX_BOUND && !RF_TEX_READY && !s_rf_legacy_draws && !(g_abx & s_rf_early_bit) && v1129x_early_b8())
+        s_rf_early_frame = 1;
     { /* v228 RF_EARLY_PHASE=0/1: the early order only on even/odd A/B phases (in-run A/B without an ABX bit --
        * every ABX bit already means something when set). Layout (SRV halves, ring halves) stays RF_EARLY's. */
       static int ph = -2; extern volatile int g_ab_phase;
@@ -13082,6 +13298,14 @@ static void render_frame_exec(void)
     srv_alias_barrier();   /* v57: new frame, no descriptor window can cross it */
     v1121d_sh_barrier();   /* v1121D: same for the shadow-only window cache */
     const int _v1121d_sh = rfast(4);   /* v1121D GF_RENDER_FAST 0x4 (needs SRV_ALIAS, checked per draw) */
+    v1129d_pc_barrier();   /* v1129D: and for the FAST2 plain-window cache */
+    const int _v1129d_pc = rfast2(4);   /* v1129D GF_RENDER_FAST2 0x4 (needs SRV_ALIAS) */
+    const int _v1129d_pm = rfast2(2);   /* v1129D GF_RENDER_FAST2 0x2 pipeline memo */
+    /* v1129D FAST2 0x2: the previous draw's pipeline arguments and result (valid while s_sf_pso_miss is unchanged) */
+    int _pm_ok = 0, _pm_vs = 0, _pm_nrt = 0, _pm_exp = 0; u32 _pm_fp = 0, _pm_bk = 0, _pm_cm = 0, _pm_cull = 0, _pm_cube = 0;
+    u32 _pm_rtf = 0, _pm_ch = 0, _pm_cc = 0, _pm_mv = 0, _pm_vsh = 0, _pm_gen = 0, _pm_miss = 0; int _pm_vsn = 0;
+    const u8* _pm_uc = NULL; const void* _pm_vsb = NULL; int _pm_bl = 0, _pm_bk2 = 0;
+    ID3D12PipelineState* _pm_pso = NULL;
     tcs_prepare(s_rf_draws, s_rf_count);   /* v228 TEXCS: this frame's cached-texture checksums in parallel */
     static int _srv_alias = -1;
     if (_srv_alias < 0) { const char* e = getenv("SRV_ALIAS"); _srv_alias = (e && *e == '0') ? 0 : 1; }
@@ -13226,6 +13450,22 @@ static void render_frame_exec(void)
                             dr->gfa = sp->gfa;
                             if (sp->gfw) { dr->gfw = sp->gfw; gfw_note(dr); }
                             _aliased = 2; _srv_aliased++; s_v1121d_sh_hits++;
+                        }
+                    }
+                }
+            }
+            if (_v1129d_pc && !_aliased) {   /* v1129D FAST2 0x4: plain windows across shadow-only draws */
+                const u32 _b3 = (u32)_srv_hash & (SRV_ALIAS_CACHE - 1u);
+                for (int _way = 0; _way < (int)SRV_ALIAS_WAYS && !_aliased; _way++) {
+                    const SRVAliasEntry* ce = &s_v1129d_pc[_b3][_way];
+                    if (ce->generation == s_v1129d_pcgen && ce->hash == _srv_hash && ce->draw < _d) {
+                        const D3D12DrawRecord* sp = &s_rf_draws[ce->draw];
+                        if (srv_alias_same(sp, dr) && v1129d_pc_zeta_ok(sp, dr)) {
+                            for (int _u = 0; _u < RSX_D3D_TEX_UNITS; _u++) dr->tex_rt[_u] = -1;
+                            dr->srv_src = sp->srv_src;
+                            dr->gfa = sp->gfa;
+                            if (sp->gfw) { dr->gfw = sp->gfw; gfw_note(dr); }
+                            _aliased = 3; _srv_aliased++; s_v1129d_pc_hits++;
                         }
                     }
                 }
@@ -13402,6 +13642,8 @@ static void render_frame_exec(void)
                         fprintf(stderr, "[SCREENTEX] bound frame copy at unit %d for"
                                         " fp=0x%X (%ux%u)%c", _u, dr->fp_addr,
                                 dr->tex[_u].w, dr->tex[_u].h, 10); }
+                    if (!s_v1129x_sc_wanted) { s_v1129x_sc_wanted = 1;
+                        if (v1129x_sclazy()) fprintf(stderr, "[v1129X] screen copy wanted (fp=0x%X unit %d): copies resume now; this frame samples the last copy taken (GF_SCREENCOPY_LAZY)%c", dr->fp_addr, _u, 10); }
                     srv_write(wslot, s_screen_copy, DXGI_FORMAT_R8G8B8A8_UNORM,
                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
                     continue;
@@ -13565,12 +13807,54 @@ static void render_frame_exec(void)
                     s_v1121d_sh_notes++;
                 } else v1121d_sh_barrier();
             }
+            if (_v1129d_pc) {   /* v1129D FAST2 0x4: plain -> note; render-target / depth-colour source -> barrier */
+                if (_plain && _srv_alias) {
+                    SRVAliasEntry ent;
+                    ent.hash = _srv_hash; ent.draw = _d; ent.generation = s_v1129d_pcgen;
+                    v1129d_pc_note((u32)_srv_hash & (SRV_ALIAS_CACHE - 1u), ent);
+                } else if (!_plain) {
+                    int _shonly = (dr->zsamp_zs < 0 && dr->shkey != 0);
+                    for (int _u = 0; _shonly && _u < RSX_D3D_TEX_UNITS; _u++) if (dr->tex_rt[_u] >= 0) _shonly = 0;
+                    if (!_shonly) v1129d_pc_barrier();
+                }
+            }
         } else if (_aliased == 2) {
             srv_alias_barrier();   /* v1121D: the draw is shadow-only, its own resolution would have ended the run (v57) */
+        } else if (_aliased == 3) {   /* v1129D FAST2 0x4: a plain draw; note it where its own resolution would have */
+            SRVAliasEntry ent;
+            ent.hash = _srv_hash; ent.draw = _d; ent.generation = s_srv_alias_generation;
+            srv_alias_note((u32)_srv_hash & (SRV_ALIAS_CACHE - 1u), ent, _srv_assoc);
+            ent.generation = s_v1129d_pcgen;
+            v1129d_pc_note((u32)_srv_hash & (SRV_ALIAS_CACHE - 1u), ent);
         }
         if (perf_on()) s_perf_srv += perf_now() - _sv0;
         double _ps0 = perf_on() ? perf_now() : 0.0;
         s_fp_meta_override = dr;
+        if (_v1129d_pm && dr->fp_addr && dr->fp_uc) {   /* v1129D FAST2 0x2: same arguments as the previous draw -> same pipeline */
+            const int a_vs = dr->vs_idx, a_nrt = dr_num_rts(dr);
+            const u32 a_rtf = (u32)(dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM);
+            const int a_exp = (int)((u32)dr->fp_exp32 | (dr_texk(dr) << 8) | (dr_t3d_mask(dr) << 24));
+            const u32 a_cm = dr->cmask | (dr->mrtk << 4), a_cube = _cube_mask | (dr->shkey << 16);
+            const void* a_vsb = (a_vs >= 0 && a_vs < s_d3d.vp_vs_n) ? (const void*)s_d3d.vp_vs[a_vs].vs : NULL;
+            const u32 a_vsh = (a_vs >= 0 && a_vs < s_d3d.vp_vs_n) ? s_d3d.vp_vs[a_vs].hash : 0;
+            if (!a_vsb) a_vsb = (const void*)s_d3d.vp_vs_blob;
+            if (_pm_ok && _pm_miss == s_sf_pso_miss && _pm_fp == dr->fp_addr && _pm_uc == dr->fp_uc && _pm_vs == a_vs &&
+                _pm_bk == dr->blend_key && _pm_nrt == a_nrt && _pm_rtf == a_rtf && _pm_exp == a_exp && _pm_cm == a_cm &&
+                _pm_cull == dr->cull && _pm_cube == a_cube && _pm_mv == dr->fp_meta_valid && _pm_ch == dr->fp_code_hash &&
+                _pm_cc == dr->fp_const_count && _pm_vsb == a_vsb && _pm_vsh == a_vsh && _pm_vsn == s_d3d.vp_vs_n &&
+                _pm_gen == s_d3d.vp_gen && _pm_bl == s_bis_literal && _pm_bk2 == s_bis_kaddr) {
+                dr->pso_memo = _pm_pso;
+                if (_sf_telem) s_v1129d_pso_memo++;
+            } else {
+                s_fp_uc_override = dr->fp_uc;
+                dr->pso_memo = vp_get_fp_pso(a_vs, dr->fp_addr, dr->blend_key, a_nrt, (DXGI_FORMAT)a_rtf, a_exp, a_cm, dr->cull, a_cube);
+                _pm_ok = dr->pso_memo != NULL; _pm_pso = dr->pso_memo; _pm_miss = s_sf_pso_miss;
+                _pm_fp = dr->fp_addr; _pm_uc = dr->fp_uc; _pm_vs = a_vs; _pm_bk = dr->blend_key; _pm_nrt = a_nrt; _pm_rtf = a_rtf;
+                _pm_exp = a_exp; _pm_cm = a_cm; _pm_cull = dr->cull; _pm_cube = a_cube; _pm_mv = dr->fp_meta_valid;
+                _pm_ch = dr->fp_code_hash; _pm_cc = dr->fp_const_count; _pm_vsb = a_vsb; _pm_vsh = a_vsh; _pm_vsn = s_d3d.vp_vs_n;
+                _pm_gen = s_d3d.vp_gen; _pm_bl = s_bis_literal; _pm_bk2 = s_bis_kaddr;
+            }
+        } else
         dr->pso_memo = dr->fp_addr
             ? (s_fp_uc_override = dr->fp_uc, vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
                             dr_num_rts(dr),
@@ -13603,6 +13887,9 @@ static void render_frame_exec(void)
           if (rfast(4)) fprintf(stderr, "[v1121D] last 300 frames: %llu shadow-only draws re-bound a previous shadow-only window, %llu noted (GF_RENDER_FAST 0x4)%c",
                                 (unsigned long long)s_v1121d_sh_hits, (unsigned long long)s_v1121d_sh_notes, 10);
           s_v1121d_sh_hits = s_v1121d_sh_notes = 0;
+          if (rfast2(6)) fprintf(stderr, "[v1129D] last 300 frames: %llu plain draws re-bound a plain window across shadow-only draws, %llu pipelines from the consecutive-draw memo (GF_RENDER_FAST2)%c",
+                                 (unsigned long long)s_v1129d_pc_hits, (unsigned long long)s_v1129d_pso_memo, 10);
+          s_v1129d_pc_hits = s_v1129d_pso_memo = 0;
           a = f = 0; s_srv_assoc_way0 = s_srv_assoc_extra = s_srv_assoc_miss = 0;
       } }
     if (s_rf_early_frame) {   /* v225A RF_EARLY: now wait for the previous frame (see the top of render_frame_exec) */
@@ -14693,6 +14980,7 @@ static void render_frame_exec(void)
                           extern int gpost_run(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES*, ID3D12Resource*, const float*, int, int);
                           zs_transition(pzs, (D3D12_RESOURCE_STATES)(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
                           cur_rt = -99; cur_zs = -2;   /* the next draw rebinds its targets (and moves the zeta back) */
+                          if (s_gq_x > 0) gq_mark(GQ_PFX_AO);   /* v1129X GF_GPU_TIMING (the next draw's rebind ends it) */
                           if (gpost_run(s_d3d.device, s_d3d.cmd_list, s_d3d.off_rt[prt].res, &s_d3d.off_rt[prt].st, s_zs[pzs].res, gfd_vp, gfd_vp_ok, gpg_at > gpo_at ? 1 : 3)) {
                               s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
                               { ID3D12DescriptorHeap* hh[] = { s_d3d.srv_heap, s_d3d.samp_heap };
@@ -14710,6 +14998,7 @@ static void render_frame_exec(void)
                       if (prt >= 0 && prt < MAX_OFF_RTS && s_d3d.off_rt[prt].res) {   /* v1117F-2: the draw's rt_off was checked above (off_rt.off is another form) */
                           extern int gpost_run(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES*, ID3D12Resource*, const float*, int, int);
                           cur_rt = -99; cur_zs = -2;
+                          if (s_gq_x > 0) gq_mark(GQ_PFX_GRADE);   /* v1129X GF_GPU_TIMING */
                           if (gpost_run(s_d3d.device, s_d3d.cmd_list, s_d3d.off_rt[prt].res, &s_d3d.off_rt[prt].st, NULL, gfd_vp, 0, 2)) {
                               s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
                               { ID3D12DescriptorHeap* hh[] = { s_d3d.srv_heap, s_d3d.samp_heap };
@@ -20759,7 +21048,7 @@ static void dc_report(void)
     s_dc_reuse_chunks = s_dc_reuse_indices = 0;
 }
 
-static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+static void d3d12_bind_texture_v1129v_body(void* ud, u32 unit, const rsx_texture_state* tex)   /* v1129V: was d3d12_bind_texture */
 {
     (void)ud;
     extern uint8_t* vm_base;
@@ -20978,6 +21267,41 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
         s_d3d.tex_dirty = 1;
     } else {
         s_d3d.tex_bound = 0;
+    }
+}
+
+/* v1129V GF_FIFO_FAST3 0x1: identical re-binds (see v1129v_f3). The comparison resolves the address exactly like the
+ * body's VP branch (TEX_RESOLVE_AUTO: IO table first, then the location bits), so a remapped IO/local page is a miss. */
+static struct { u32 reg[9]; u32 r; int valid; } s_v1129v_bt[RSX_D3D_TEX_UNITS];
+static unsigned long long s_v1129v_bt_calls, s_v1129v_bt_skips, s_v1129v_bt_t0;
+static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+{
+    if (!v1129v_f3(1)) { d3d12_bind_texture_v1129v_body(ud, unit, tex); return; }
+    extern u32 cellGcmResolveLocated(int local, u32 offset);
+    extern u32 cellGcmResolveIO(u32);
+    static int ra = -1; if (ra < 0) ra = getenv("TEX_RESOLVE_AUTO") ? 1 : 0;
+    u32 r = ra ? cellGcmResolveIO(tex->offset) : 0;
+    if (!r) r = cellGcmResolveLocated((tex->format & 3) == 1, tex->offset);
+    const u32 reg[9] = { tex->offset, tex->format, tex->address, tex->control0, tex->control1, tex->filter,
+                         tex->image_rect, tex->border_color, tex->control3 };
+    s_v1129v_bt_calls++;
+    int skip = 0;
+    if (unit < RSX_D3D_TEX_UNITS && s_v1129v_bt[unit].valid && s_d3d.tex_bound == 0 &&
+        (((tex->format >> 8) & 0x9Fu) != 0x81u) && s_v1129v_bt[unit].r == r &&
+        !memcmp(s_v1129v_bt[unit].reg, reg, sizeof reg)) skip = 1;
+    if (skip) s_v1129v_bt_skips++;
+    else {
+        d3d12_bind_texture_v1129v_body(ud, unit, tex);
+        if (unit < RSX_D3D_TEX_UNITS) { memcpy(s_v1129v_bt[unit].reg, reg, sizeof reg); s_v1129v_bt[unit].r = r; s_v1129v_bt[unit].valid = 1; }
+    }
+    if ((s_v1129v_bt_calls & 1023u) == 0) {
+        const unsigned long long now = GetTickCount64();
+        if (!s_v1129v_bt_t0) s_v1129v_bt_t0 = now;
+        else if (now - s_v1129v_bt_t0 >= 10000) {
+            fprintf(stderr, "[v1129V] 10 s: bind_texture %llu calls, %llu identical re-binds skipped (%.1f %%)%c",
+                    s_v1129v_bt_calls, s_v1129v_bt_skips, 100.0 * (double)s_v1129v_bt_skips / (double)s_v1129v_bt_calls, 10);
+            s_v1129v_bt_calls = s_v1129v_bt_skips = 0; s_v1129v_bt_t0 = now;
+        }
     }
 }
 
