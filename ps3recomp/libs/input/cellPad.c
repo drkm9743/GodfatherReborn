@@ -3061,8 +3061,8 @@ static void pad_poll_kbm_generic(int merge)
               if (w && !pw) { pad_motion_trigger(MOT_FORWARD); what = "W -> forward"; }
               { static int py = 0; const int y = KD('Y');   /* v1130J: Y = twist (garrote neck snap); E stays the grab attack */
                 if (y && !py) { pad_motion_trigger(MOT_TWIST); what = "Y -> twist"; } py = y; }
-              if (!c && KD('A') && !pa) { pad_motion_trigger(MOT_LEFT); what = "A -> left (slam into low objects)"; }   /* EA: A / D slam */
-              if (!c && KD('D') && !pd) { pad_motion_trigger(MOT_RIGHT); what = "D -> right (slam into low objects)"; }
+              /* v1130AA (user: "A / D while grabbing should move"): no side gesture -- if (!c && KD('A') && !pa) { pad_motion_trigger(MOT_LEFT); what = "A -> left (slam into low objects)"; }   (EA: A / D slam) */
+              /* v1130AA (user: "A / D while grabbing should move"): no side gesture -- if (!c && KD('D') && !pd) { pad_motion_trigger(MOT_RIGHT); what = "D -> right (slam into low objects)"; } */
           }
           if (c && !pc) { const int a = KD('A'), d = KD('D');
               pad_motion_trigger(cmb_grab && a && !d ? MOT_KNEE_L : cmb_grab && d && !a ? MOT_KNEE_R : MOT_DOWN); what = "Ctrl -> down / knee"; }
